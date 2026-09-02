@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -138,8 +138,8 @@
         "rewrite_image": [["\\?.*$", ""]]
       },
       "snapshot": {
-        "keep_elements": ["div.post-wrap"],
-        "remove_elements": [".open-app-btn", ".bottom-bar", ".nav-bar"]
+        "request_url": ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
+        "keep_elements": ["div.post-page"],
       }
     },
    "*.xiaoheihe.cn": {
