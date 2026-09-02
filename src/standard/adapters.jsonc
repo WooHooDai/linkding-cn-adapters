@@ -1,0 +1,209 @@
+{
+  "_meta": {
+    "id": "woohoodai",
+    "name": "official-standard",
+    "version": "0.1.0",
+    "description": "Official, general-purpose site adapters maintained by Linkding-cn."
+  },
+  "defaults": {},
+  "domains": {
+    "mp.weixin.qq.com": { "snapshot": { "remove_elements": [".swiper_indicator_wrp_pc"], "process_carousels": ".share_media_swiper" } },
+    "*.feishu.cn": {
+      "defaults": { "timeout": 600 },
+      "metadata": { "scripts": [{ "path": "./scripts/feishu/feishu_metadata.py", "hook": "replace" }], "rewrite_title": [" - 飞书云文档$", ""] },
+      "snapshot": {
+        "wait_elements": [".page-block.root-block"],
+        "wait_elements_timeout": 30,
+        "scripts": [{ "path": "./scripts/feishu/feishu_snapshot.js", "hook": "before" }],
+        "remove_elements": [ ".navigation-bar__left",".suite-header",".ssrWaterMark",".document-bottom-slot",".layer-popup",".suspension-comment-area","button" ],
+        "set_styles": {
+          "html, body": { "overflow": "visible !important", "height": "auto !important" },
+          "#mainBox": { "height": "auto !important", "overflow": "visible !important" },
+          "#mainContainer": { "height": "auto !important", "overflow": "visible !important", "position": "static !important" },
+          ".app-main-container": { "height": "auto !important", "overflow": "visible !important", "width": "auto !important" },
+          ".app-main": { "height": "auto !important", "overflow": "visible !important", "width": "auto !important", "minWidth": "0 !important" },
+          ".suite-body": { "height": "auto !important", "overflow": "visible !important", "width": "auto !important" },
+          ".garr-container": { "height": "auto !important", "overflow": "visible !important", "width": "auto !important" },
+          ".bear-web-x-container": { "overflow": "visible !important", "height": "auto !important", "maxHeight": "none !important", "width": "auto !important" },
+          ".catalogue-container": { "height": "auto !important", "overflow": "visible !important", "position": "absolute !important", "top": "0 !important" },
+          ".catalogue": { "position": "static !important", "height": "auto !important" },
+          ".catalogue__scroller": { "max-height": "none !important", "overflow": "visible !important" }
+        },
+        "singlefile_args": { "--browser-wait-delay": "3000", "--browser-capture-max-time": "600000", "--remove-hidden-elements": false, "--remove-unused-fonts": true, "--remove-frames": true, "--remove-no-script-tags": true }
+      },
+      "reader": { "defuddle_args": { "contentSelector": [".page-block.root-block", ".docx-page-block"] } }
+    },
+    "www.zhihu.com": {
+      "auth": { "cookie": { "type": "auto", "verify": { "content_check": { "invalid_patterns": ["安全验证"] } }, "refresh": { "wait_cookie": "z_c0" } } },
+      "defaults": { "timeout": 30 },
+      "metadata": { "select_title": ["meta[property='og:title']"], "select_description": ["meta[property='og:description']"], "select_image": [".RichText img"] },
+      "snapshot": {
+        "keep_elements": [".QuestionHeader", ".QuestionAnswer-content"],
+        "remove_elements": [".ContentItem-expandButton", ".QuestionButtonGroup", ".QuestionHeaderActions > button", ".Popover"],
+        "toggles": { "question-detail": { "selector": ".QuestionHeader span#content", "default": false, "label": "问题详情" } },
+        "process_lazy_images": ["data-actualsrc", "data-original"],
+        "remove_classes": { ".RichContent": ["is-collapsed"], ".RichContent-inner": ["RichContent-inner--collapsed"] },
+        "set_styles": { "html": { "overflow": "auto" }, ".RichContent-inner": { "maxHeight": "none", "overflow": "visible" }, ".ContentItem-actions": { "margin-top": "30px" } },
+        "scripts": [{ "path": "./scripts/zhihu/zhihu.js", "hook": "before" }]
+      },
+      "reader": { "defuddle_args": { "contentSelector": [".RichText"] } }
+    },
+    "*.xiaohongshu.com": { "type": "alias", "target": "xhslink.com" },
+    "xhslink.cn": { "type": "alias", "target": "xhslink.com" },
+    "xhslink.com": {
+      "metadata": { "select_image": ["meta:nth-child(2 of [property='og:image'])"], "rewrite_title": [[" - 小红书$", ""]] },
+      "snapshot": {
+        "keep_elements": ["#noteContainer"],
+        "remove_elements": ["div[elementtiming='note-cover']", ".note-detail-follow-btn", ".comments-login"],
+        "scripts": [
+          { "path": "./scripts/xiaohongshu/xhs_render.py", "hook": "before" },
+          { "path": "./scripts/xiaohongshu/xhs.js", "hook": "before" },
+          { "path": "./scripts/xiaohongshu/xhs.js", "hook": "after" }
+        ],
+        "process_carousels": [".media-container"],
+        "toggles": { "video": { "selector": ".video-player-media.media-container", "default": true, "label": "保存视频" } },
+        "singlefile_args": { "--blocked-URL-pattern": ["\\.js$"], "--block-videos": "true", "--remove-unused-styles": "false", "--browser-width": "1440", "--browser-height": "900" }
+      },
+      "reader": { "defuddle_args": { "removeContentPatterns": false } }
+    },
+    "twitter.com": { "type": "alias", "target": "x.com" },
+    "www.twitter.com": { "type": "alias", "target": "x.com" },
+    "www.x.com": { "type": "alias", "target": "x.com" },
+    "x.com": {
+      "snapshot": {
+        "singlefile_args": { "--blocked-URL-pattern": ["\\.js$"], "--remove-unused-styles": "false" },
+        "remove_elements": ["header", "[data-testid='sidebarColumn']", "footer", "aside", "div[aria-hidden='true']"]
+      },
+      "reader": { "defuddle_args": { "contentSelector": ["[id^='urt:conversation']"], "removeContentPatterns": false, "removeLowScoring": false } }
+    },
+    "www.reddit.com": {
+      "auth": { "cookie": { "type": "auto", "refresh": { "url": "https://www.reddit.com", "wait_cookie": "loid", "timeout": 30, "user_data_dir": "default" }, "verify": { "http_head_probe": {"enabled": false}, "content_check": { "enabled": false} } } },
+      "metadata": {
+        "content_type": "json",
+        "request_url": ["^(.*?)/?(?:\\?.*)?$", "\\1/.json"],
+        "select_title": ["$[0].data.children[0].data.title"],
+        "select_description": ["$[0].data.children[0].data.selftext"],
+        "select_image": ["$[0].data.children[0].data.thumbnail"],
+        "rewrite_image": [
+          ["^https://preview\\.redd\\.it/([^?]+).*$", "https://i.redd.it/\\1"],
+          ["^.*/(?:self|default|nsfw|spoiler)$", ""]
+        ],
+        "scripts": [{ "path": "./scripts/reddit/reddit_metadata.py", "hook": "replace", "timeout": 60 }]
+      },
+      "snapshot": {
+        "timeout": 60,
+        "content_type": "html",
+        "process_carousels": ["div[slot='post-media-container']"],
+        "scripts": [
+          { "path": "./scripts/reddit/reddit_before.js", "hook": "before" },
+          { "path": "./scripts/reddit/reddit_after.js", "hook": "after" }
+        ],
+        "remove_elements": ["button[aria-label='Back']", "pdp-back-button", "button[aria-label='Open user actions']", "button[aria-label='Share']", "shreddit-async-loader[bundlename='status_icons']", "shreddit-comment[author='AutoModerator']", "shreddit-comment-action-row", "div[slot='actionRow']", "comment-body-header", "shreddit-comment-badges", "shreddit-comment-tree-ad", "shreddit-comments-page-ad", "#pdp-credit-bar > span.flex.items-center.ps-xs", "#pdp-credit-bar shreddit-async-loader", "#pdp-credit-bar shreddit-brand-affiliate-tag", "shreddit-header", "shreddit-sidebar", "reddit-sidebar-nav", "shreddit-subreddit-sidebar", "faceplate-search-input", "comment-composer-host", "shreddit-composer", "reddit-rte", "rte-toolbar", "rte-toolbar-button", "shreddit-comments-sort-dropdown", "shreddit-sort-dropdown", "shreddit-good-visit-tracker", "shreddit-seo-good-visit-tracker", "devvit-wrapper", "reputation-recaptcha", "alert-controller", "div.threadline-strip"],
+        "wait_elements": ["[slot='text-body'] .md | .md", "span.avatar"],
+        "wait_elements_timeout": 15,
+        "keep_elements": ["main#main-content"],
+        "singlefile_args": { "--remove-hidden-elements": true, "--remove-unused-fonts": true, "--remove-frames": true, "--remove-no-script-tags": true, "--browser-wait-delay": "12000" },
+        "toggles": { "comments": { "selector": "shreddit-comment-tree", "label": "评论", "default": true } }
+      },
+      "reader": { "defuddle_args": { "contentSelector": ["[slot='text-body'] .md", ".md"] } }
+    },
+    "*.notion.site": {
+      "defaults": { "timeout": 60 },
+      "metadata": { "scripts": [{ "path": "./scripts/notion/notion.py", "hook": "replace" }] },
+      "snapshot": {
+        "wait_elements": [".notion-page-content"],
+        "wait_elements_timeout": 30,
+        "process_lazy_images": true,
+        "remove_elements": [".notion-sidebar-container", ".notion-topbar", ".notion-help-button"],
+        "set_styles": {
+          "html.notion-html, body.notion-body": { "overflow": "auto !important", "height": "auto !important" },
+          "#notion-app, .notion-app-inner, .notion-frame, .notion-scroller, .notion-cursor-listener": { "overflow": "visible !important", "max-height": "none !important", "height": "auto !important" },
+          ":root": { "--full-viewport-height": "auto !important", "--dynamic-viewport-height": "auto !important" }
+        },
+        "scripts": [
+          { "path": "./scripts/notion/notion_snapshot.js", "hook": "before" },
+          { "path": "./scripts/notion/notion.py", "hook": "after", "timeout": 120 }
+        ]
+      },
+      "reader": { "defuddle_args": { "contentSelector": ".notion-page-content" } }
+    },
+    "m.okjike.com": { "type": "alias", "target": "web.okjike.com" },
+    "web.okjike.com": {
+      "metadata": {
+        "load_full_page": true,
+        "request_url": ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
+        "select_title": ["title"],
+        "select_description": [".jsx-1330250023.text"],
+        "rewrite_title": [[" - 即刻App$", ""]]
+      },
+      "snapshot": {
+        "keep_elements": ["div.post-wrap"],
+        "remove_elements": [".open-app-btn", ".bottom-bar", ".nav-bar"]
+      }
+    },
+   "*.xiaoheihe.cn": {
+     "metadata": {
+        "auth": { "cookie": { "type": "auto", "refresh": { "url": "https://www.xiaoheihe.cn", "wait_cookie": "x_xhh_tokenid", "timeout": 30, "user_data_dir": "default" }, "verify": { "http_head_probe": {"enabled": false}, "content_check": { "enabled": false} } } },
+        "use_browser": {
+          "wait_until": "domcontentloaded",
+          "wait_elements": [".hb-article"],
+          "timeout": 30
+        },
+        "select_description": [".hb-article p"],
+        "select_image": [".hb-article img.img-item"]
+      },
+      "snapshot": {
+        "keep_elements": [".hb-bbs-link"],
+        "remove_elements": [".hb-bbs-link__header", ".scroll-list__to-login", ".link-reply__input-wrapper"],
+        "scripts": [{ "path": "./scripts/xiaoheihe/xiaoheihe_snapshot.js", "hook": "before" }]
+      }
+    },
+    "*.36kr.com": { "type": "alias","target": "36kr.com" },
+    "36kr.com": {
+      "metadata": {
+        "request_url": ["^https?://36kr\\.com/p/(\\d+)", "https://www.36kr.com/p/\\1"],
+        "select_image":".article-left-container img",
+        "rewrite_title": [["-36氪$", ""]]
+      },
+      "snapshot": {
+        "request_url": ["^https?://36kr\\.com/p/(\\d+)", "https://www.36kr.com/p/\\1"],
+        "keep_elements": ["div.article-left-container"],
+        "remove_elements": [".article-footer-txt",".thumb-up-box",".comment-part:nth-of-type(1)",".relate-articles"],
+        "remove_classes": {".navbar-inner-box": ["fixed"]}
+      }
+    },
+    "b23.tv": { "type": "alias", "target": "www.bilibili.com" },
+    "www.bilibili.com": {
+      "metadata": {
+        "rewrite_title": [["_哔哩哔哩_bilibili$", ""], [" - 哔哩哔哩$", ""]],
+        "select_title": ["title"],
+        "select_description": [".opus-module-content p"],
+        "select_image": ["meta[property='og:image']",".bili-opus-view img"]
+      },
+      "snapshot": {
+        "remove_elements": [".login-panel-popover", ".bili-header", ".opus-module-bottom", "#header", "#limit-mask", "#end"]
+      },
+      "routes": {
+        "^/video/": {
+          "metadata": { "select_description": ["script[type='application/ld+json'][data-vmid='webpage-jsonld']::json(description)"] },
+          "snapshot": { "enabled": false },
+          "reader": { "defuddle_args": { "useAsync": true } }
+        },
+        "^/read/cv": {
+          "metadata": {
+            "http": { "Referer": "https://www.bilibili.com/" },
+            "request_url": ["^https?://www\\.bilibili\\.com/read/cv(\\d+)(\\?.*)?", "https://api.bilibili.com/x/article/viewinfo?id=\\1&mobi_app=pc&from=web&gaia_source=main_web"],
+            "content_type": "json",
+            "select_title": ["$.data.title"],
+            "select_image": ["$.data.image_urls[0]"],
+          },
+          "snapshot": {
+            "wait_elements": [".opus-module-content"],"wait_elements_timeout": 20,
+            "timeout": 60,
+            "singlefile_args": { "--browser-wait-delay": "3000", "--browser-capture-max-time": "120000" }
+          }
+        }
+      }
+    }
+  }
+}
