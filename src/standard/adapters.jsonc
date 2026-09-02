@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -134,7 +134,8 @@
         "request_url": ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
         "select_title": ["title"],
         "select_description": [".jsx-1330250023.text"],
-        "rewrite_title": [[" - 即刻App$", ""]]
+        "rewrite_title": [[" - 即刻App$", ""]],
+        "rewrite_image": [["\\?.*$", ""]]
       },
       "snapshot": {
         "keep_elements": ["div.post-wrap"],
