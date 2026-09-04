@@ -1,780 +1,2716 @@
 /**
- * Feishu snapshot browser-script (runs inside SingleFile's browser process).
+ * Feishu snapshot browser-script for SingleFile.
  *
- * builtin_engine = "singlefile" — this script runs in the real page via
- * SingleFile's --browser-script mechanism, NOT from a local file.
- *
- * Feishu docx pages use React virtual scrolling: only blocks near the
- * current scroll viewport exist in the DOM. Blocks that scroll out of view
- * are unmounted and replaced by placeholder divs
- * (.bear-virtual-renderUnit-placeholder). A single page can have 6000+ blocks
- * and 350K+ pixels of content, but at any given time only ~20-60 blocks
- * are actually rendered.
- *
- * STRATEGY: Scroll-and-collect.
- *   1. Wait for the page content container to appear.
- *   2. Scroll through the entire .bear-web-x-container (the native scroll
- *      container with overflow:hidden scroll). At each position, clone
- *      visible blocks (identified by data-block-id) into a Map.
- *   3. For blocks with unloaded images (src="data:,"), poll up to 3s for
- *      the image to load (src changes to "blob:..."), then clone.
- *      A second scroll pass re-collects blocks that were still loading.
- *   4. After scrolling, replace the render-unit-wrapper's children with
- *      collected blocks sorted by numeric block-id.
- *   5. Convert blob: URLs to data: URLs (Feishu uses blob URLs for images;
- *      SingleFile cannot serialize them, so they become empty data:,).
- *   6. Fix table inline styles (React sets width:2px as placeholder).
- *   7. Expand all containers (height:auto, overflow:visible) for capture.
- *   8. Fix #mainContainer position:absolute → static so body gets full height.
- *   9. Show the TOC (catalogue-container height:auto).
- *
- * IMPORTANT: Do NOT change display:flex → display:block on parent containers.
- * The native flex layout distributes height correctly to .bear-web-x-container
- * (656px in 720px viewport), which is needed for scrolling. Changing display
- * causes the container to lose its height, making scroll impossible.
- *
- * set_styles (from cleanup config) runs AFTER this before hook. It will
- * apply the final height:auto + overflow:visible styles, which is fine
- * because by then all content is already in the DOM.
+ * Strategy:
+ *   1. Detect Feishu renderer.
+ *   2. Scroll through virtualized content.
+ *   3. After every scroll position, wait until visible images are either:
+ *        - loaded, or
+ *        - converted directly through Feishu's image API, or
+ *        - timeout after 3s.
+ *      Poll every 50ms.
+ *   4. Clone only the currently mounted top-level blocks.
+ *   5. For Callout blocks, independently accumulate their virtualized children.
+ *   6. Rebuild the main render-unit-wrapper.
+ *   7. Rebuild virtualized catalogue.
+ *   8. Fix table/image layout.
+ *   9. Expand containers for SingleFile capture.
  */
+
 const builtin_engine = "singlefile";
 
-async function before(url, config) {
-  // Wait for the main content container to appear.
-  const waitForSelector = (sel, timeout = 30000) => new Promise((resolve) => {
-    const el = document.querySelector(sel);
-    if (el) return resolve(true);
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+const IMAGE_POLL_INTERVAL = 50;
+const IMAGE_STABLE_COUNT = 2;
+const IMAGE_VIEWPORT_TIMEOUT = 3000;
+
+const INITIAL_RENDER_DELAY = 500;
+const SCROLL_RENDER_DELAY = 50;
+
+/* -------------------------------------------------------------------------- */
+/* Shared utilities                                                           */
+/* -------------------------------------------------------------------------- */
+
+const sleep = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+function waitForSelector(sel, timeout = 30000) {
+  return new Promise((resolve) => {
+    const existing = document.querySelector(sel);
+    if (existing) {
+      resolve(true);
+      return;
+    }
+
     const observer = new MutationObserver(() => {
       if (document.querySelector(sel)) {
         observer.disconnect();
         resolve(true);
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
-    setTimeout(() => { observer.disconnect(); resolve(false); }, timeout);
-  });
 
-  await waitForSelector('.render-unit-wrapper, .page-block.root-block', 30000);
-
-  const scroller = document.querySelector('.bear-web-x-container');
-  if (!scroller) {
-    // Fallback: simple window scroll
-    for (let i = 0; i < 200; i++) {
-      window.scrollBy(0, window.innerHeight);
-      await new Promise(r => setTimeout(r, 400));
-      if ((window.innerHeight + window.scrollY) >= document.body.scrollHeight) break;
+    if (!document.body) {
+      resolve(false);
+      return;
     }
-    window.scrollTo(0, 0);
-    await new Promise(r => setTimeout(r, 500));
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    setTimeout(() => {
+      observer.disconnect();
+      resolve(false);
+    }, timeout);
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Image utilities                                                            */
+/* -------------------------------------------------------------------------- */
+
+const imageDataCache = new Map();
+const imagePromiseCache = new Map();
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fetchToDataUrl(url) {
+  if (!url) return null;
+
+  if (url.startsWith("data:")) {
+    return url;
+  }
+
+  if (imageDataCache.has(url)) {
+    return imageDataCache.get(url);
+  }
+
+  if (imagePromiseCache.has(url)) {
+    return imagePromiseCache.get(url);
+  }
+
+  const promise = (async () => {
+    try {
+      const response = await fetch(url, {
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const blob = await response.blob();
+
+      if (!blob.type || !blob.type.startsWith("image/")) {
+        return null;
+      }
+
+      const dataUrl = await blobToDataUrl(blob);
+
+      if (dataUrl) {
+        imageDataCache.set(url, dataUrl);
+      }
+
+      return dataUrl;
+    } catch {
+      return null;
+    } finally {
+      imagePromiseCache.delete(url);
+    }
+  })();
+
+  imagePromiseCache.set(url, promise);
+
+  return promise;
+}
+
+function isEmptyImage(img) {
+  const src = img.getAttribute("src") || "";
+  return src === "data:," || src === "data:";
+}
+
+function isBlobImage(img) {
+  const src = img.getAttribute("src") || "";
+  return src.startsWith("blob:");
+}
+
+function getImageToken(img) {
+  const owner = img.closest("[image-token]");
+  if (!owner) return null;
+
+  return owner.getAttribute("image-token");
+}
+
+async function convertUnloadedImage(img) {
+  const token = getImageToken(img);
+
+  if (!token) {
+    return false;
+  }
+
+  try {
+    const apiUrl =
+      `/space/api/box/stream/download/asynccode/?code=` +
+      `${encodeURIComponent(token)}&preview_type=1`;
+
+    const response = await fetch(apiUrl, {
+      credentials: "include",
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const blob = await response.blob();
+
+    if (!blob.type || !blob.type.startsWith("image/")) {
+      return false;
+    }
+
+    const dataUrl = await blobToDataUrl(blob);
+
+    if (!dataUrl || dataUrl.length < 100) {
+      return false;
+    }
+
+    img.setAttribute("src", dataUrl);
+    img.removeAttribute("data-src");
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForImageStable(img, timeout = IMAGE_VIEWPORT_TIMEOUT) {
+  const start = Date.now();
+
+  let lastSrc = img.getAttribute("src") || "";
+  let lastWidth = img.naturalWidth || 0;
+  let stableCount = 0;
+
+  while (Date.now() - start < timeout) {
+    const src = img.getAttribute("src") || "";
+    const width = img.naturalWidth || 0;
+
+    const loaded =
+      !isEmptyImage(img) &&
+      (
+        width > 0 ||
+        src.startsWith("data:") ||
+        src.startsWith("blob:")
+      );
+
+    if (loaded) {
+      if (src === lastSrc && width === lastWidth) {
+        stableCount++;
+
+        if (stableCount >= IMAGE_STABLE_COUNT) {
+          return true;
+        }
+      } else {
+        stableCount = 0;
+        lastSrc = src;
+        lastWidth = width;
+      }
+    } else {
+      stableCount = 0;
+      lastSrc = src;
+      lastWidth = width;
+    }
+
+    await sleep(IMAGE_POLL_INTERVAL);
+  }
+
+  return false;
+}
+
+async function canvasConvertImage(img) {
+  try {
+    if (!img.naturalWidth || !img.naturalHeight) {
+      return false;
+    }
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+
+    const ctx = canvas.getContext("2d");
+
+    if (!ctx) {
+      return false;
+    }
+
+    ctx.drawImage(img, 0, 0);
+
+    const dataUrl = canvas.toDataURL("image/png");
+
+    if (!dataUrl || dataUrl.length < 100) {
+      return false;
+    }
+
+    img.setAttribute("src", dataUrl);
+    img.removeAttribute("data-src");
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function convertBlobImage(img) {
+  const src = img.getAttribute("src") || "";
+
+  if (!src.startsWith("blob:")) {
+    return false;
+  }
+
+  /*
+   * Remember the current blob URL.
+   *
+   * Feishu can replace the blob URL during progressive loading.
+   * We therefore check it again after waiting.
+   */
+  const originalSrc = src;
+
+  await waitForImageStable(img);
+
+  const currentSrc = img.getAttribute("src") || "";
+
+  if (!currentSrc.startsWith("blob:")) {
+    return currentSrc.startsWith("data:");
+  }
+
+  /*
+   * Fetch the exact blob currently attached to this image.
+   */
+  try {
+    const dataUrl = await fetchToDataUrl(currentSrc);
+
+    /*
+     * The image may have been replaced while fetch() was running.
+     * In that case, don't overwrite the newer version.
+     */
+    const latestSrc = img.getAttribute("src") || "";
+
+    if (
+      dataUrl &&
+      dataUrl.length > 100 &&
+      (
+        latestSrc === currentSrc ||
+        latestSrc === originalSrc
+      )
+    ) {
+      img.setAttribute("src", dataUrl);
+      img.removeAttribute("data-src");
+      return true;
+    }
+  } catch {
+    // Continue to canvas fallback.
+  }
+
+  /*
+   * Canvas fallback.
+   *
+   * This is useful when fetch(blob:) is unavailable but the image bitmap
+   * itself is already available in the browser.
+   */
+  if (img.naturalWidth > 0) {
+    if (await canvasConvertImage(img)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function convertImage(img) {
+  if (!img || !img.isConnected) {
+    return false;
+  }
+
+  if (isEmptyImage(img)) {
+    return convertUnloadedImage(img);
+  }
+
+  if (isBlobImage(img)) {
+    return convertBlobImage(img);
+  }
+
+  const src = img.getAttribute("src") || "";
+  const dataSrc = img.getAttribute("data-src");
+
+  /*
+   * Some Feishu image implementations expose the actual URL through
+   * data-src rather than src.
+   */
+  if (
+    dataSrc &&
+    !dataSrc.startsWith("data:")
+  ) {
+    const dataUrl = await fetchToDataUrl(dataSrc);
+
+    if (dataUrl) {
+      img.setAttribute("src", dataUrl);
+      img.removeAttribute("data-src");
+      return true;
+    }
+  }
+
+  /*
+   * Normal HTTP image.
+   *
+   * We generally leave these alone because SingleFile can handle ordinary
+   * network images itself. Only convert when the browser has already loaded
+   * the image and the URL is explicitly Feishu-managed.
+   */
+  if (
+    src.startsWith("http://") ||
+    src.startsWith("https://")
+  ) {
+    return false;
+  }
+
+  return false;
+}
+
+function getImages(root) {
+  if (!root) return [];
+
+  const images = [];
+
+  if (root.matches && root.matches("img")) {
+    images.push(root);
+  }
+
+  images.push(...root.querySelectorAll("img"));
+
+  return images;
+}
+
+function hasImagesNeedingAttention(root) {
+  const images = getImages(root);
+
+  for (const img of images) {
+    if (isEmptyImage(img) || isBlobImage(img)) {
+      return true;
+    }
+
+    const dataSrc = img.getAttribute("data-src");
+
+    if (
+      dataSrc &&
+      !dataSrc.startsWith("data:")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Process all images currently mounted in a viewport.
+ *
+ * Important:
+ * We don't simply "sleep 3 seconds".
+ *
+ * We poll every 50ms and return as soon as all images have reached a usable
+ * state. The 3-second value is only a safety timeout.
+ */
+async function prepareViewport(root) {
+  const images = getImages(root);
+
+  if (images.length === 0) {
+    return true;
+  }
+
+  const deadline = Date.now() + IMAGE_VIEWPORT_TIMEOUT;
+
+  while (Date.now() < deadline) {
+    let allReady = true;
+
+    for (const img of images) {
+      if (!img.isConnected) {
+        continue;
+      }
+
+      if (isEmptyImage(img)) {
+        allReady = false;
+        continue;
+      }
+
+      if (isBlobImage(img)) {
+        /*
+         * A blob image may already be loaded, but we need to wait until
+         * progressive loading has settled before converting it.
+         */
+        const srcBefore = img.getAttribute("src") || "";
+        const widthBefore = img.naturalWidth || 0;
+
+        if (!widthBefore) {
+          allReady = false;
+          continue;
+        }
+
+        const stable = await waitForImageStable(
+          img,
+          Math.max(IMAGE_POLL_INTERVAL * 2, 200)
+        );
+
+        if (!stable) {
+          allReady = false;
+          continue;
+        }
+
+        /*
+         * Convert immediately after stabilization.
+         */
+        await convertBlobImage(img);
+
+        if (isBlobImage(img)) {
+          allReady = false;
+        }
+
+        /*
+         * If Feishu changed the source while processing, check again.
+         */
+        const srcAfter = img.getAttribute("src") || "";
+
+        if (
+          srcAfter !== srcBefore ||
+          (img.naturalWidth || 0) !== widthBefore
+        ) {
+          allReady = false;
+        }
+
+        continue;
+      }
+
+      const dataSrc = img.getAttribute("data-src");
+
+      if (
+        dataSrc &&
+        !dataSrc.startsWith("data:")
+      ) {
+        await convertImage(img);
+
+        if (img.getAttribute("data-src")) {
+          allReady = false;
+        }
+      }
+    }
+
+    /*
+     * Try direct API conversion for any images still unloaded.
+     */
+    for (const img of images) {
+      if (!img.isConnected) continue;
+
+      if (isEmptyImage(img)) {
+        const converted = await convertUnloadedImage(img);
+
+        if (!converted) {
+          allReady = false;
+        }
+      }
+    }
+
+    if (!hasImagesNeedingAttention(root)) {
+      /*
+       * Give the browser two 50ms ticks to settle any src replacement.
+       */
+      await sleep(IMAGE_POLL_INTERVAL);
+      await sleep(IMAGE_POLL_INTERVAL);
+
+      if (!hasImagesNeedingAttention(root)) {
+        return true;
+      }
+    } else {
+      allReady = false;
+    }
+
+    if (allReady) {
+      return true;
+    }
+
+    await sleep(IMAGE_POLL_INTERVAL);
+  }
+
+  /*
+   * Timeout:
+   * do one last direct conversion attempt for empty images.
+   */
+  for (const img of getImages(root)) {
+    if (!img.isConnected) continue;
+
+    if (isEmptyImage(img)) {
+      await convertUnloadedImage(img);
+    }
+
+    if (isBlobImage(img)) {
+      await convertBlobImage(img);
+    }
+  }
+
+  return !hasImagesNeedingAttention(root);
+}
+
+async function convertImagesInElement(root) {
+  if (!root) return;
+
+  for (const img of getImages(root)) {
+    if (isEmptyImage(img)) {
+      await convertUnloadedImage(img);
+    } else if (isBlobImage(img)) {
+      await convertBlobImage(img);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* New Feishu renderer                                                        */
+/* -------------------------------------------------------------------------- */
+
+async function collectNewFeishu(scroller, wrapper) {
+  if (!scroller || !wrapper) {
     return;
   }
 
-  // Phase 1: Scroll through the entire page and collect blocks.
-  // Feishu's virtual scroll unmounts blocks that leave the viewport,
-  // so we must clone each block before it gets recycled.
-  scroller.scrollTo(0, 0);
-  await new Promise(r => setTimeout(r, 500));
+  const isLine = (el) =>
+    el &&
+    el.nodeType === Node.ELEMENT_NODE &&
+    (
+      el.classList.contains("ace-line") ||
+      el.matches("[data-record-id], [data-block-id]") ||
+      (el.id && el.id.startsWith("magicdomid"))
+    );
 
-  /** @type {Map<string, HTMLElement>} block-id → cloned element */
-  const collectedBlocks = new Map();
+  /*
+   * The new renderer's #innerdocbody is itself the logical root.
+   * Only direct children are collected as top-level lines.
+   */
+  const visibleLines = () =>
+    Array.from(wrapper.children).filter(isLine);
+
+  const collectedLines = new Map();
+
+  const getLineKey = (el) => {
+    return (
+      el.getAttribute("data-record-id") ||
+      el.getAttribute("data-block-id") ||
+      el.id ||
+      null
+    );
+  };
+
+  const snapshotVisibleLines = async () => {
+    const lines = visibleLines();
+
+    for (const line of lines) {
+      const key = getLineKey(line);
+
+      if (!key) {
+        continue;
+      }
+
+      /*
+       * Even if the line was already collected, inspect it again when it
+       * contains images. Feishu may progressively replace the image.
+       */
+      const needsImages = hasImagesNeedingAttention(line);
+
+      if (
+        collectedLines.has(key) &&
+        !needsImages
+      ) {
+        continue;
+      }
+
+      if (needsImages) {
+        await prepareViewport(line);
+      }
+
+      await convertImagesInElement(line);
+
+      collectedLines.set(
+        key,
+        line.cloneNode(true)
+      );
+    }
+  };
+
+  scroller.scrollTop = 0;
+  await sleep(INITIAL_RENDER_DELAY);
+
   let totalScroll = scroller.scrollHeight;
-  // Step size: clientHeight ensures full viewport coverage.
-  // The virtual scroll renders blocks within ~2x viewport height.
-  const step = Math.max(scroller.clientHeight - 50, 300);
-  // Use a smaller step (2/3 viewport) to ensure overlap between scroll
-  // positions — virtual scroll may only render blocks within ~1x viewport
-  // height, so stepping by full clientHeight can skip boundary blocks.
-  const effectiveStep = Math.max(Math.floor(scroller.clientHeight * 2 / 3), 200);
-  const scrollDelay = 60; // ms — enough for React to render (2-3 frames)
 
-  // Helper: check if a block has images that haven't loaded yet.
-  // Unloaded state: src is "data:," (empty placeholder, ~6 bytes).
-  // Loaded state: src is "blob:..." (Feishu uses blob URLs for loaded images).
-  const hasUnloadedImages = (el) => {
-    const imgs = el.querySelectorAll('img');
-    for (const img of imgs) {
-      if (img.src.startsWith('data:,')) return true;
-    }
-    return false;
-  };
+  const step = Math.max(
+    Math.floor(scroller.clientHeight * 2 / 3),
+    200
+  );
 
-  // Helper: convert blob: URLs to data: URLs in-place on the live DOM.
-  // Must be called BEFORE cloneNode — cloned img elements lose their
-  // blob: URL references (cloneNode serializes src to the string "data:,").
-  //
-  // Feishu images use progressive loading: a low-res thumbnail loads first,
-  // then the full-res image replaces it. Both use blob: URLs. If we fetch
-  // the blob too early, we get the low-res version.
-  //
-  // Strategy:
-  //   1. Wait for img.naturalWidth to stabilize (no change for 400ms).
-  //   2. Fetch the blob and convert to data: URL via FileReader.
-  //   3. If the resulting naturalWidth is suspiciously small (< 400px),
-  //      try the canvas approach — drawImage captures whatever bitmap
-  //      the <img> element currently has loaded, which may be higher-res.
-  //   4. As a last resort, try to find the original image URL from
-  //      PerformanceResourceTiming and fetch that directly.
-  const convertBlobImages = async (el) => {
-    const blobImgs = Array.from(el.querySelectorAll('img[src^="blob:"]'));
-    for (const img of blobImgs) {
-      // Wait for naturalWidth to stabilize (progressive loading may
-      // replace the blob with a higher-res version).
-      let lastW = 0;
-      let stable = 0;
-      for (let i = 0; i < 25; i++) { // 25 × 200ms = 5s max
-        const w = img.naturalWidth;
-        if (w > 0 && w === lastW) {
-          stable++;
-          if (stable >= 2) break; // stable for 400ms
-        } else {
-          stable = 0;
-          lastW = w;
-        }
-        await new Promise(r => setTimeout(r, 200));
-      }
+  let previousCount = -1;
 
-      let converted = false;
+  for (
+    let pass = 0;
+    pass < 3 && collectedLines.size > previousCount;
+    pass++
+  ) {
+    previousCount = collectedLines.size;
 
-      // Method 1: fetch blob + FileReader
-      try {
-        const response = await fetch(img.src);
-        const blob = await response.blob();
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
+    for (
+      let y = 0;
+      y <= totalScroll + 3000;
+      y += step
+    ) {
+      scroller.scrollTop = y;
 
-        // Check if the converted image is suspiciously small
-        // by loading it into a temporary Image
-        const tempImg = new Image();
-        await new Promise((resolve, reject) => {
-          tempImg.onload = resolve;
-          tempImg.onerror = reject;
-          tempImg.src = dataUrl;
-        });
+      /*
+       * Let React mount the new virtualized viewport.
+       */
+      await sleep(SCROLL_RENDER_DELAY);
 
-        if (tempImg.naturalWidth >= 400 || tempImg.naturalWidth >= img.naturalWidth) {
-          img.src = dataUrl;
-          converted = true;
-        }
-      } catch (e) {
-        // Fall through to Method 2
-      }
-
-      // Method 2: canvas.drawImage — captures the full bitmap
-      // currently loaded in the <img> element.
-      if (!converted) {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth || img.width;
-          canvas.height = img.naturalHeight || img.height;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0);
-          const canvasUrl = canvas.toDataURL('image/png');
-          img.src = canvasUrl;
-          converted = true;
-        } catch (e2) {
-          // CORS-tainted canvas — can't use toDataURL
-        }
-      }
-
-      // Method 3: Find original image URL from PerformanceResourceTiming
-      // and fetch it directly. This works when the blob is a low-res
-      // thumbnail but the original fetch URL returns full-res.
-      if (!converted) {
-        try {
-          const entries = performance.getEntriesByType('resource');
-          // Look for image download URLs from Feishu's internal API
-          const imgEntry = entries.find(e =>
-            e.initiatorType === 'img' &&
-            e.name.includes('download') &&
-            e.name.includes('feishu')
-          );
-          if (imgEntry) {
-            const response = await fetch(imgEntry.name, { credentials: 'include' });
-            const blob = await response.blob();
-            const dataUrl = await new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-            img.src = dataUrl;
-            converted = true;
-          }
-        } catch (e3) {
-          // All methods failed — leave image as-is
-        }
-     }
-   }
- };
-
-  // Helper: convert images that are still at src="data:," (never loaded).
-  // These images have an image-token attribute on a parent element.
-  // We construct the Feishu internal API download URL from the token
-  // and fetch the image directly.
-  const convertUnloadedImages = async (el) => {
-    const emptyImgs = Array.from(el.querySelectorAll('img[src^="data:,"]'));
-    for (const img of emptyImgs) {
-      // Find the image-token from the parent .image-block element
-      const imageBlock = img.closest('[image-token]');
-      if (!imageBlock) continue;
-      const token = imageBlock.getAttribute('image-token');
-      if (!token) continue;
-
-      try {
-        // Feishu internal API for image download
-        const apiUrl = `/space/api/box/stream/download/asynccode/?code=${token}&preview_type=1`;
-        const response = await fetch(apiUrl, { credentials: 'include' });
-        if (!response.ok) continue;
-        const blob = await response.blob();
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-        if (dataUrl && dataUrl.length > 100) {
-          img.src = dataUrl;
-        }
-      } catch (e) {
-        // Image fetch failed — leave as data:,
-      }
-    }
-  };
-
-  // Wait for an image's src to change from "data:," to a real URL.
-  // This only waits for the initial load (blob: URL to appear).
-  // The actual resolution stabilization is handled in convertBlobImages.
-  const waitForImageLoad = (block, maxWait = 5000) => new Promise((resolve) => {
-    const imgs = Array.from(block.querySelectorAll('img'));
-    if (imgs.length === 0) return resolve(false);
-
-    let resolved = false;
-    const check = () => {
-      if (resolved) return;
-      const allLoaded = imgs.every(img => !img.src.startsWith('data:,'));
-      if (allLoaded) {
-        resolved = true;
-        resolve(true);
-        return true;
-      }
-      return false;
-    };
-
-    if (check()) return;
-
-    const interval = setInterval(() => {
-      if (check()) clearInterval(interval);
-    }, 200);
-
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        clearInterval(interval);
-        resolve(false);
-      }
-    }, maxWait);
-  });
-
-  // Track blocks whose images were unloaded on first encounter.
-  // We'll do a second scroll pass to re-collect them.
-  const blocksNeedingRecheck = new Set();
-
-  // Callout blocks have their own internal virtual scrolling.
-  // When the main scroller is at different positions, the callout renders
-  // different subsets of its child blocks. We accumulate ALL child blocks
-  // we've ever seen inside each callout, then merge them into a single
-  // clone at the end.
-  // Map: calloutBlockId → Map(childBlockId → cloned child element)
-  const calloutChildren = new Map();
-  // Set of block IDs that are callout blocks (type=callout)
-  const calloutBlockIds = new Set();
-
-  // Catalogue (TOC) items are also virtual-scrolled by Feishu.
-  // The catalogue__scroller only renders items near the current scroll
-  // position. We collect all catalogue__list-item elements we see during
-  // scrolling, then merge them at the end.
-  // Map: data-id → cloned <li> element
-  const collectedCatalogueItems = new Map();
-
-  // Multi-pass scroll collection.
-  // Pass 0: Collect all blocks. For image blocks with src="data:,",
-  //         wait for the image to load (poll up to 3s), then clone.
-  //         Mark for recheck if still unloaded after timeout.
-  // Pass 1: Re-visit blocks that had unloaded images and re-clone if loaded.
-  //         Also accumulate new child blocks seen inside callouts.
-  // Pass 2+: Extra passes for very long pages where virtual scrolling may
-  //          miss blocks due to fast scroll timing. Stop when no new blocks.
-  const maxPasses = 3;
-  let lastCollectedCount = 0;
-  let lastCatalogueCount = 0;
-  for (let pass = 0; pass < maxPasses; pass++) {
-    // Pass 0 uses the larger step for fast coverage; later passes use the
-    // smaller step to catch blocks missed at the boundary.
-    const passStep = pass === 0 ? step : effectiveStep;
-    for (let y = 0; y <= totalScroll + 2000; y += passStep) {
-      scroller.scrollTo(0, y);
-      await new Promise(r => setTimeout(r, scrollDelay));
-
-      // Update scroll target if content grew (lazy-loaded sections)
       if (scroller.scrollHeight > totalScroll) {
         totalScroll = scroller.scrollHeight;
       }
 
-      // Collect catalogue (TOC) items — they are virtual-scrolled too.
-      document.querySelectorAll('.catalogue__list-item[data-id]').forEach(item => {
-        const itemId = item.getAttribute('data-id');
-        if (itemId && !collectedCatalogueItems.has(itemId)) {
-          collectedCatalogueItems.set(itemId, item.cloneNode(true));
-        }
-      });
-
-      // Collect rendered blocks that have data-block-id
-      const blocks = scroller.querySelectorAll('.render-unit-wrapper > [data-block-id]');
-      for (const block of blocks) {
-        const blockId = block.getAttribute('data-block-id');
-        if (!blockId) continue;
-
-        // Check if this is a callout block (contains .callout-render-unit)
-        const calloutWrapper = block.querySelector('.callout-render-unit');
-        const isCallout = block.getAttribute('data-block-type') === 'callout' ||
-                          (calloutWrapper && block.classList.contains('docx-callout-block'));
-        if (isCallout) {
-          calloutBlockIds.add(blockId);
-          // Collect all currently-rendered child blocks inside the callout
-          const childBlocks = calloutWrapper.querySelectorAll('[data-block-id]');
-          if (childBlocks.length > 0) {
-            if (!calloutChildren.has(blockId)) {
-              calloutChildren.set(blockId, new Map());
-            }
-            const childMap = calloutChildren.get(blockId);
-            for (const child of childBlocks) {
-              const childId = child.getAttribute('data-block-id');
-              if (!childId || childId === blockId) continue;
-              if (!childMap.has(childId)) {
-                // New child block seen for the first time
-                if (hasUnloadedImages(child)) {
-                  await waitForImageLoad(child, 3000);
-                }
-                await convertBlobImages(child);
-                childMap.set(childId, child.cloneNode(true));
-              }
-            }
-          }
-        }
-
-        if (!collectedBlocks.has(blockId)) {
-          // First time seeing this block
-          if (hasUnloadedImages(block)) {
-            // Image not loaded yet — wait for progressive loading to finish
-            const loaded = await waitForImageLoad(block, 5000);
-            if (!loaded && hasUnloadedImages(block)) {
-              // Image never loaded via blob URL — try fetching via API.
-              await convertUnloadedImages(block);
-            }
-            if (hasUnloadedImages(block)) {
-              blocksNeedingRecheck.add(blockId);
-            }
-          }
-          // Convert blob: URLs to data: URLs BEFORE cloning.
-          // cloneNode loses blob: URL references (they become "data:,").
-          await convertBlobImages(block);
-          // For callout blocks, don't clone yet — we'll build the final
-          // version in Phase 2 after accumulating all children.
-          if (!isCallout) {
-            collectedBlocks.set(blockId, block.cloneNode(true));
-          } else {
-            // Store a base clone (shell without children) — we'll merge children later
-            collectedBlocks.set(blockId, block.cloneNode(true));
-          }
-        } else if (blocksNeedingRecheck.has(blockId)) {
-          // Second pass: re-collect if images have now loaded.
-          // Wait again for progressive loading to stabilize.
-          await waitForImageLoad(block, 5000);
-          // If still unloaded, try fetching via image-token API.
-          if (hasUnloadedImages(block)) {
-            await convertUnloadedImages(block);
-          }
-          if (!hasUnloadedImages(block)) {
-            await convertBlobImages(block);
-            collectedBlocks.set(blockId, block.cloneNode(true));
-            blocksNeedingRecheck.delete(blockId);
-          }
-        }
-      }
+      await snapshotVisibleLines();
     }
 
-    // Stop early if no new blocks were collected in this pass.
-    if (pass >= 1 && collectedBlocks.size === lastCollectedCount &&
-        collectedCatalogueItems.size === lastCatalogueCount) {
-      break;
-    }
-    lastCollectedCount = collectedBlocks.size;
-    lastCatalogueCount = collectedCatalogueItems.size;
+    scroller.scrollTop = totalScroll;
+    await sleep(SCROLL_RENDER_DELAY);
+
+    await snapshotVisibleLines();
   }
 
-  // After both passes: for each callout block, merge ALL accumulated child
-  // blocks into the callout's .callout-render-unit container. This ensures
-  // we have the complete set of children even if they were rendered at
-  // different scroll positions.
-  for (const [calloutId, childMap] of calloutChildren) {
-    const calloutEl = collectedBlocks.get(calloutId);
-    if (!calloutEl) continue;
-    const calloutWrapper = calloutEl.querySelector('.callout-render-unit');
-    if (!calloutWrapper) continue;
+  /*
+   * Comments are handled independently below.
+   */
+  const numericOrder = (el) => {
+    const match = (el.id || "").match(/magicdomid-(\d+)/);
 
-    // Get existing child IDs in the clone
-    const existingIds = new Set();
-    for (const existing of calloutWrapper.querySelectorAll('[data-block-id]')) {
-      existingIds.add(existing.getAttribute('data-block-id'));
+    if (match) {
+      return parseInt(match[1], 10);
     }
 
-    // Append any accumulated children that aren't already in the clone
-    const sortedChildren = Array.from(childMap.entries())
-      .sort((a, b) => parseInt(a[0], 10) - parseInt(b[0], 10));
-    for (const [childId, childEl] of sortedChildren) {
-      if (existingIds.has(childId)) continue;
-      calloutWrapper.appendChild(childEl);
+    return Number.MAX_SAFE_INTEGER;
+  };
+
+  const sortedLines = Array.from(
+    collectedLines.values()
+  ).sort(
+    (a, b) =>
+      numericOrder(a) - numericOrder(b)
+  );
+
+  if (sortedLines.length > 0) {
+    wrapper.replaceChildren(...sortedLines);
+  }
+
+  wrapper
+    .querySelectorAll(
+      ".adit-virtual-scroll-placeholder, " +
+      ".fixed-size-list-placeholder"
+    )
+    .forEach((el) => el.remove());
+}
+
+/* -------------------------------------------------------------------------- */
+/* Legacy renderer helpers                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Find the actual main render-unit-wrapper.
+ *
+ * We intentionally prefer a wrapper directly under the main scroller.
+ * This avoids accidentally selecting a nested render-unit-wrapper inside
+ * a table / callout / other compound block.
+ */
+function findMainLegacyWrapper(scroller) {
+  if (!scroller) {
+    return null;
+  }
+
+  /*
+   * First choice:
+   * wrapper directly contained by the main scrolling container.
+   */
+  const direct = Array.from(
+    scroller.querySelectorAll(".render-unit-wrapper")
+  ).find((el) => {
+    let parent = el.parentElement;
+
+    while (parent && parent !== scroller) {
+      if (
+        parent.matches(
+          ".docx-table-block, " +
+          ".docx-callout-block, " +
+          "[data-block-type='table_cell']"
+        )
+      ) {
+        return false;
+      }
+
+      parent = parent.parentElement;
+    }
+
+    return parent === scroller;
+  });
+
+  if (direct) {
+    return direct;
+  }
+
+  /*
+   * Fallback: the first wrapper whose direct children contain block IDs.
+   */
+  const candidates = Array.from(
+    scroller.querySelectorAll(".render-unit-wrapper")
+  );
+
+  for (const candidate of candidates) {
+    const hasTopLevelBlock = Array.from(
+      candidate.children
+    ).some((child) =>
+      child.hasAttribute("data-block-id")
+    );
+
+    if (hasTopLevelBlock) {
+      return candidate;
     }
   }
 
-  // Phase 2: Replace virtual scroll content with collected blocks.
-  // Some blocks (e.g., callout 127) contain nested sub-blocks (221-229)
-  // that were also independently collected during scrolling. We keep the
-  // nested version (inside its parent which provides styling context)
-  // and skip the standalone duplicate.
-  //
-  // Additionally, callout blocks have their own internal virtual scrolling.
-  // When a callout was first collected, some of its child blocks may not
-  // have been rendered yet. Those children were collected as standalone
-  // top-level blocks during scrolling. We need to merge them back into the
-  // parent callout's render-unit-wrapper to restore the correct structure.
-  const wrapper = document.querySelector('.render-unit-wrapper');
-  if (wrapper && collectedBlocks.size > 0) {
-    // Sort by numeric block-id to restore document order
-    const sortedEntries = Array.from(collectedBlocks.entries())
-      .sort((a, b) => parseInt(a[0], 10) - parseInt(b[0], 10));
+  return null;
+}
 
-    // Identify blocks that are nested inside other collected blocks.
-    const nestedBlockIds = new Set();
-    // Map: parent block-id → Set of nested block-ids found in parent
-    const parentNested = new Map(); // parentId → Set(childIds)
-    for (const [parentId, element] of sortedEntries) {
-      const nested = element.querySelectorAll('[data-block-id]');
-      const childIds = new Set();
-      for (const n of nested) {
-        const nid = n.getAttribute('data-block-id');
-        if (nid && nid !== parentId) {
-          nestedBlockIds.add(nid);
-          childIds.add(nid);
-        }
-      }
-      if (childIds.size > 0) {
-        parentNested.set(parentId, childIds);
-      }
+function getTopLevelLegacyBlocks(wrapper) {
+  if (!wrapper) {
+    return [];
+  }
+
+  /*
+   * IMPORTANT:
+   *
+   * Do NOT use:
+   *
+   *   wrapper.querySelectorAll(...)
+   *
+   * because nested render-unit-wrapper instances inside tables, callouts,
+   * cells, etc. would then leak their internal blocks into the top-level
+   * collection.
+   *
+   * Only direct children are logical top-level blocks.
+   */
+  return Array.from(wrapper.children).filter(
+    (el) =>
+      el.nodeType === Node.ELEMENT_NODE &&
+      el.hasAttribute("data-block-id")
+  );
+}
+
+function isCalloutBlock(block) {
+  if (!block) {
+    return false;
+  }
+
+  return (
+    block.getAttribute("data-block-type") === "callout" ||
+    block.classList.contains("docx-callout-block") ||
+    !!block.querySelector(".callout-render-unit")
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Legacy renderer                                                            */
+/* -------------------------------------------------------------------------- */
+
+async function collectLegacyFeishu(scroller, wrapper) {
+  if (!scroller || !wrapper) {
+    return;
+  }
+
+  scroller.scrollTo(0, 0);
+  await sleep(INITIAL_RENDER_DELAY);
+
+  /** @type {Map<string, HTMLElement>} */
+  const collectedBlocks = new Map();
+
+  /*
+   * calloutBlockId -> Map(childBlockId -> cloned child)
+   */
+  const calloutChildren = new Map();
+
+  /*
+   * Catalogue items are independently virtualized.
+   */
+  const collectedCatalogueItems = new Map();
+
+  /*
+   * Blocks whose images could not be completed on first encounter.
+   */
+  const blocksNeedingRecheck = new Set();
+
+  let totalScroll = scroller.scrollHeight;
+
+  const step = Math.max(
+    scroller.clientHeight - 50,
+    300
+  );
+
+  const effectiveStep = Math.max(
+    Math.floor(scroller.clientHeight * 2 / 3),
+    200
+  );
+
+  /**
+   * Collect children currently mounted inside a Callout.
+   */
+  const collectCalloutChildren = async (
+    calloutBlock,
+    calloutId
+  ) => {
+    const calloutWrapper =
+      calloutBlock.querySelector(
+        ".callout-render-unit"
+      );
+
+    if (!calloutWrapper) {
+      return;
     }
 
-    // For each parent that has nested children, check if all expected
-    // children are present. If a child was collected standalone but is
-    // missing from the parent (because the parent was cloned before the
-    // child rendered), merge the standalone child into the parent's
-    // callout-render-unit container.
-    for (const [parentId, childIds] of parentNested) {
-      const parentEl = collectedBlocks.get(parentId);
-      if (!parentEl) continue;
+    /*
+     * Unlike top-level blocks, callout children are intentionally searched
+     * recursively because the Callout owns its internal render tree.
+     */
+    const childBlocks = Array.from(
+      calloutWrapper.querySelectorAll(
+        "[data-block-id]"
+      )
+    );
 
-      // Find the callout's inner render-unit-wrapper
-      const calloutWrapper = parentEl.querySelector('.callout-render-unit');
-      if (!calloutWrapper) continue;
-
-      // Check which collected blocks are children of this parent
-      // but NOT currently present in the parent's clone.
-      for (const [blockId, element] of sortedEntries) {
-        if (!childIds.has(blockId)) continue;
-        // Check if this child is already in the parent clone
-        if (parentEl.querySelector(`[data-block-id="${blockId}"]`)) {
-          continue; // Already present in parent
-        }
-        // This child was collected as a standalone block but should be
-        // inside the parent. Merge it into the callout wrapper.
-        // Insert in correct order (by block-id).
-        const childIdNum = parseInt(blockId, 10);
-        let inserted = false;
-        const children = Array.from(calloutWrapper.children);
-        for (const sibling of children) {
-          const siblingId = sibling.getAttribute('data-block-id');
-          if (siblingId && parseInt(siblingId, 10) > childIdNum) {
-            calloutWrapper.insertBefore(element, sibling);
-            inserted = true;
-            break;
-          }
-        }
-        if (!inserted) {
-          calloutWrapper.appendChild(element);
-        }
-        // Mark as nested so it's skipped in the top-level loop
-        nestedBlockIds.add(blockId);
-      }
+    if (childBlocks.length === 0) {
+      return;
     }
 
-    // Also mark any blocks that were accumulated as callout children.
-    // These may not appear in the parent's clone (they were added after
-    // the parent was cloned), but they should still be skipped at the
-    // top level since they belong inside the callout.
-    for (const [, childMap] of calloutChildren) {
-      for (const childId of childMap.keys()) {
-        nestedBlockIds.add(childId);
-      }
+    if (!calloutChildren.has(calloutId)) {
+      calloutChildren.set(
+        calloutId,
+        new Map()
+      );
     }
 
-    // Clear existing content (rendered blocks + placeholders)
-    wrapper.innerHTML = '';
+    const childMap =
+      calloutChildren.get(calloutId);
 
-    // Insert collected blocks in order, skipping any that are nested inside
-    // another block (to avoid duplicate content).
-    const fragment = document.createDocumentFragment();
-    for (const [blockId, element] of sortedEntries) {
-      if (nestedBlockIds.has(blockId)) {
-        // This block is already included inside its parent block — skip it.
+    for (const child of childBlocks) {
+      const childId =
+        child.getAttribute("data-block-id");
+
+      if (
+        !childId ||
+        childId === calloutId
+      ) {
         continue;
       }
-      fragment.appendChild(element);
+
+      /*
+       * A nested child may itself contain renderer elements with
+       * data-block-id. We only care about the direct logical block
+       * candidates where possible.
+       */
+      let logicalChild = child;
+
+      const childParent = child.parentElement;
+
+      if (
+        childParent &&
+        childParent !== calloutWrapper
+      ) {
+        /*
+         * Walk upward until the direct child of calloutWrapper.
+         */
+        let current = child;
+
+        while (
+          current.parentElement &&
+          current.parentElement !== calloutWrapper
+        ) {
+          current = current.parentElement;
+        }
+
+        if (
+          current.parentElement === calloutWrapper &&
+          current.hasAttribute("data-block-id")
+        ) {
+          logicalChild = current;
+        }
+      }
+
+      const logicalChildId =
+        logicalChild.getAttribute(
+          "data-block-id"
+        );
+
+      if (!logicalChildId) {
+        continue;
+      }
+
+      if (
+        childMap.has(logicalChildId)
+      ) {
+        continue;
+      }
+
+      if (
+        hasImagesNeedingAttention(
+          logicalChild
+        )
+      ) {
+        const loaded =
+          await prepareViewport(
+            logicalChild
+          );
+
+        if (!loaded) {
+          await convertImagesInElement(
+            logicalChild
+          );
+        }
+      }
+
+      await convertImagesInElement(
+        logicalChild
+      );
+
+      childMap.set(
+        logicalChildId,
+        logicalChild.cloneNode(true)
+      );
     }
-    wrapper.appendChild(fragment);
-  }
+  };
 
-  // Phase 2a: Merge orphaned table cell text blocks back into their <td> elements.
-  //
-  // Feishu tables have <td> elements (data-block-type=table_cell) that each
-  // contain a render-unit-wrapper. When the table is scrolled into view,
-  // the render-unit-wrapper renders the cell's text content as a
-  // docx-text-block child. However, Feishu's virtual scrolling sometimes
-  // renders the cell content as a standalone top-level block in the main
-  // render-unit-wrapper instead of inside the <td>. This leaves the <td>'s
-  // render-unit-wrapper with only a bear-virtual-renderUnit-placeholder.
-  //
-  // Feishu assigns sequential block IDs: the <td> gets ID N, and its text
-  // content block gets ID N+1. So we can match orphaned text blocks to
-  // their parent <td> by checking td_id + 1 = text_block_id.
-  //
-  // This phase finds <td> elements whose render-unit-wrapper contains only
-  // a placeholder (no real content), looks up the corresponding text block
-  // (td_id + 1) from collectedBlocks, and moves it into the <td>. Since
-  // appendChild moves DOM nodes, this automatically removes the text block
-  // from the top-level wrapper (where it was placed in Phase 2).
-  document.querySelectorAll('.docx-table-block').forEach(tableBlock => {
-    const tds = tableBlock.querySelectorAll('td[data-block-type="table_cell"]');
-    for (const td of tds) {
-      const tdId = td.getAttribute('data-block-id');
-      if (!tdId) continue;
+  /**
+   * Collect currently mounted top-level blocks.
+   */
+  const collectVisibleBlocks = async () => {
+    /*
+     * CRITICAL:
+     *
+     * This is now based on wrapper.children rather than:
+     *
+     *   scroller.querySelectorAll(
+     *       '.render-unit-wrapper > [data-block-id]'
+     *   )
+     *
+     * That old approach could collect block IDs from nested render trees
+     * and caused non-text/non-image blocks to be incorrectly treated as
+     * nested and subsequently removed.
+     */
+    const blocks =
+      getTopLevelLegacyBlocks(wrapper);
 
-      // Check if this <td>'s render-unit-wrapper lacks real content
-      const ruw = td.querySelector('.render-unit-wrapper');
-      if (!ruw) continue;
-      // Skip if the render-unit-wrapper already has a real block inside
-      if (ruw.querySelector('[data-block-id]')) continue;
+    for (const block of blocks) {
+      const blockId =
+        block.getAttribute(
+          "data-block-id"
+        );
 
-      // Find the orphaned text block: td_id + 1
-      const textBlockId = String(parseInt(tdId, 10) + 1);
-      const textBlock = collectedBlocks.get(textBlockId);
-      if (!textBlock) continue;
-      // Verify it's a text block (not another table_cell or table)
-      if (!textBlock.classList.contains('docx-text-block')) continue;
+      if (!blockId) {
+        continue;
+      }
 
-      // Move the text block into the <td>'s render-unit-wrapper,
-      // replacing any placeholder. appendChild moves the node from
-      // wherever it currently is (top-level wrapper) into the <td>.
-      ruw.innerHTML = '';
-      ruw.appendChild(textBlock);
-    }
-  });
+      const isCallout =
+        isCalloutBlock(block);
 
-  // Phase 2b: Fix table inline styles.
-  // React's virtual scrolling sets width:2px (or similar small px) on
-  // <table class="table"> elements as a placeholder before the component
-  // measures and sets the real width. After cloning, this inline style
-  // persists and overrides CSS width:fit-content from .table-scrollable-content.
-  // Remove the bogus width so CSS takes over.
-  document.querySelectorAll('.docx-table-block table.table').forEach(tbl => {
-    const style = tbl.getAttribute('style') || '';
-    // Only remove if width is a small pixel value (placeholder, not real width)
-    const widthMatch = style.match(/width:\s*(\d+(?:\.\d+)?)px/);
-    if (widthMatch && parseFloat(widthMatch[1]) < 50) {
-      tbl.style.removeProperty('width');
-    }
-  });
+      /*
+       * Callout children have their own virtualized renderer.
+       * Accumulate them every time the Callout is mounted.
+       */
+      if (isCallout) {
+        await collectCalloutChildren(
+          block,
+          blockId
+        );
+      }
 
-  // Phase 2c: Fix table scrollable-wrapper and scrollable-container.
-  // React sets width:0px on .scrollable-wrapper and .scrollable-container
-  // as a placeholder before measuring. Also .scrollable-wrapper may have
-  // a negative left offset for centering. These inline styles break table
-  // rendering in the snapshot.
-  document.querySelectorAll('.docx-table-block .scrollable-wrapper').forEach(el => {
-    const w = el.style.width;
-    if (!w || w === '0px') {
-      el.style.setProperty('width', 'fit-content', 'important');
-    }
-    // Remove the negative left offset used for centering
-    if (el.style.left && el.style.left !== '0px') {
-      el.style.removeProperty('left');
-    }
-  });
-  document.querySelectorAll('.docx-table-block .scrollable-container').forEach(el => {
-    const w = el.style.width;
-    if (!w || w === '0px') {
-      el.style.setProperty('width', 'fit-content', 'important');
-    }
-  });
+      const existing =
+        collectedBlocks.get(blockId);
 
-  // Phase 2d: Fix table content-scroller overflow.
-  // .content-scroller has overflow:hidden which clips tables in the snapshot.
-  document.querySelectorAll('.docx-table-block .content-scroller').forEach(el => {
-    el.style.setProperty('overflow', 'visible', 'important');
-    el.style.setProperty('max-width', 'none', 'important');
-  });
+      /*
+       * First encounter.
+       */
+      if (!existing) {
+        const needsImages =
+          hasImagesNeedingAttention(block);
 
-  // Phase 2d-bis: Fix table scrollable-item left offset.
-  // React sets left:NNNpx on .scrollable-item to center the table within
-  // the scrollable-container. In the snapshot this pushes tables to the
-  // right. Remove the left offset so tables align left.
-  document.querySelectorAll('.scrollable-item').forEach(el => {
-    if (el.style.left && el.style.left !== '0px') {
-      el.style.setProperty('left', '0px', 'important');
-    }
-  });
+        if (needsImages) {
+          const loaded =
+            await prepareViewport(block);
 
-  // Phase 2e: Fix image block width-wrapper.
-  // React may set an excessively large width (e.g., 3017px) on
-  // .image-block-width-wrapper as a placeholder. This stretches the image
-  // and causes blurriness. Remove the inline width so CSS takes over.
-  document.querySelectorAll('.docx-image-block .image-block-width-wrapper').forEach(el => {
-    const w = el.style.width;
-    if (w) {
-      const pxMatch = w.match(/^(\d+(?:\.\d+)?)px$/);
-      if (pxMatch && parseFloat(pxMatch[1]) > 1000) {
-        // Bogus large width — remove it
-        el.style.removeProperty('width');
+          if (!loaded) {
+            blocksNeedingRecheck.add(
+              blockId
+            );
+
+            await convertImagesInElement(
+              block
+            );
+          }
+        }
+
+        await convertImagesInElement(
+          block
+        );
+
+        collectedBlocks.set(
+          blockId,
+          block.cloneNode(true)
+        );
+
+        /*
+         * If images are still unresolved, revisit this block in a later pass.
+         */
+        if (
+          hasImagesNeedingAttention(block)
+        ) {
+          blocksNeedingRecheck.add(
+            blockId
+          );
+        } else {
+          blocksNeedingRecheck.delete(
+            blockId
+          );
+        }
+
+        continue;
+      }
+
+      /*
+       * Existing block:
+       *
+       * Normally we don't need to clone it again.
+       * If its images were unresolved previously, however, the current
+       * mounted instance may now contain the completed image.
+       */
+      if (
+        blocksNeedingRecheck.has(blockId)
+      ) {
+        const loaded =
+          await prepareViewport(block);
+
+        if (loaded) {
+          await convertImagesInElement(
+            block
+          );
+
+          if (
+            !hasImagesNeedingAttention(
+              block
+            )
+          ) {
+            collectedBlocks.set(
+              blockId,
+              block.cloneNode(true)
+            );
+
+            blocksNeedingRecheck.delete(
+              blockId
+            );
+          }
+        } else {
+          await convertImagesInElement(
+            block
+          );
+        }
       }
     }
-  });
+  };
 
-  // Phase 2f: Remove empty blocks and virtual scroll artifacts.
-  // After collecting blocks, remove:
-  // - isEmpty text blocks (empty paragraphs that show as blank lines).
-  //   These have the .isEmpty class directly ON the [data-block-id] element
-  //   (e.g. <div class="block docx-text-block isEmpty" data-block-id=5>),
-  //   NOT on a descendant. Use the compound selector [data-block-id].isEmpty.
-  // - bear-virtual-renderUnit-placeholder divs (virtual scroll remnants)
-  // - bear-virtual-pre-renderer divs (virtual scroll pre-renderer remnants)
-  document.querySelectorAll('[data-block-id].isEmpty').forEach(el => {
-    el.remove();
-  });
-  document.querySelectorAll('.bear-virtual-renderUnit-placeholder').forEach(el => {
-    el.remove();
-  });
-  document.querySelectorAll('.bear-virtual-pre-renderer').forEach(el => {
-    el.remove();
-  });
+  const collectCatalogue = () => {
+    document
+      .querySelectorAll(
+        ".catalogue__list-item[data-id]"
+      )
+      .forEach((item) => {
+        const itemId =
+          item.getAttribute("data-id");
 
-  // Phase 2g: Rebuild the catalogue (TOC) from collected items.
-  // Feishu's catalogue is also virtual-scrolled, so only items near the
-  // current scroll position exist in the DOM at any time. We collected all
-  // catalogue__list-item elements we saw during scrolling; now merge them
-  // back into the <ul class="catalogue__list"> container, sorted by their
-  // position in the document (determined by the corresponding heading order).
-  if (collectedCatalogueItems.size > 0) {
-    const catList = document.querySelector('.catalogue__list');
-    if (catList) {
-      // Build a map of heading record-id → position index for ordering.
-      // Each catalogue item has data-id matching a heading's data-record-id.
-      const headingOrder = new Map();
-      document.querySelectorAll('[data-block-type^="heading"]').forEach(h => {
-        const rid = h.getAttribute('data-record-id');
-        if (rid) headingOrder.set(rid, headingOrder.size);
+        if (
+          itemId &&
+          !collectedCatalogueItems.has(
+            itemId
+          )
+        ) {
+          collectedCatalogueItems.set(
+            itemId,
+            item.cloneNode(true)
+          );
+        }
+      });
+  };
+
+  /*
+   * Multi-pass collection.
+   */
+  const maxPasses = 4;
+
+  let lastCollectedCount = 0;
+  let lastCatalogueCount = 0;
+  let lastPendingImageCount = Number.MAX_SAFE_INTEGER;
+
+  for (
+    let pass = 0;
+    pass < maxPasses;
+    pass++
+  ) {
+    const passStep =
+      pass === 0
+        ? step
+        : effectiveStep;
+
+    for (
+      let y = 0;
+      y <= totalScroll + 2000;
+      y += passStep
+    ) {
+      scroller.scrollTo(0, y);
+
+      /*
+       * Only a short initial render delay.
+       *
+       * prepareViewport() below performs the real 50ms polling when
+       * mounted images actually need attention.
+       */
+      await sleep(
+        SCROLL_RENDER_DELAY
+      );
+
+      if (
+        scroller.scrollHeight >
+        totalScroll
+      ) {
+        totalScroll =
+          scroller.scrollHeight;
+      }
+
+      collectCatalogue();
+
+      await collectVisibleBlocks();
+    }
+
+    /*
+     * Always inspect the very bottom.
+     */
+    scroller.scrollTop = totalScroll;
+
+    await sleep(
+      SCROLL_RENDER_DELAY
+    );
+
+    collectCatalogue();
+
+    await collectVisibleBlocks();
+
+    const pendingImageCount =
+      blocksNeedingRecheck.size;
+
+    /*
+     * Stop when:
+     *
+     * 1. no new blocks,
+     * 2. no new catalogue items,
+     * 3. unresolved image count did not improve.
+     */
+    if (
+      pass >= 1 &&
+      collectedBlocks.size ===
+        lastCollectedCount &&
+      collectedCatalogueItems.size ===
+        lastCatalogueCount &&
+      pendingImageCount ===
+        lastPendingImageCount
+    ) {
+      break;
+    }
+
+    lastCollectedCount =
+      collectedBlocks.size;
+
+    lastCatalogueCount =
+      collectedCatalogueItems.size;
+
+    lastPendingImageCount =
+      pendingImageCount;
+  }
+
+  /*
+   * One final targeted pass for blocks whose images remained unresolved.
+   *
+   * We cannot jump directly to a block's position reliably, because Feishu's
+   * virtual list does not expose a stable pixel offset for every block.
+   * Therefore a final normal pass is safer.
+   */
+  if (blocksNeedingRecheck.size > 0) {
+    for (
+      let y = 0;
+      y <= totalScroll + 1000;
+      y += effectiveStep
+    ) {
+      scroller.scrollTo(0, y);
+
+      await sleep(
+        SCROLL_RENDER_DELAY
+      );
+
+      const blocks =
+        getTopLevelLegacyBlocks(
+          wrapper
+        );
+
+      for (const block of blocks) {
+        const blockId =
+          block.getAttribute(
+            "data-block-id"
+          );
+
+        if (
+          !blockId ||
+          !blocksNeedingRecheck.has(
+            blockId
+          )
+        ) {
+          continue;
+        }
+
+        await prepareViewport(block);
+        await convertImagesInElement(
+          block
+        );
+
+        if (
+          !hasImagesNeedingAttention(
+            block
+          )
+        ) {
+          collectedBlocks.set(
+            blockId,
+            block.cloneNode(true)
+          );
+
+          blocksNeedingRecheck.delete(
+            blockId
+          );
+        }
+      }
+
+      if (
+        blocksNeedingRecheck.size === 0
+      ) {
+        break;
+      }
+    }
+  }
+
+  /*
+   * Merge accumulated Callout children back into their Callout.
+   */
+  for (
+    const [
+      calloutId,
+      childMap
+    ] of calloutChildren
+  ) {
+    const calloutEl =
+      collectedBlocks.get(
+        calloutId
+      );
+
+    if (!calloutEl) {
+      continue;
+    }
+
+    const calloutWrapper =
+      calloutEl.querySelector(
+        ".callout-render-unit"
+      );
+
+    if (!calloutWrapper) {
+      continue;
+    }
+
+    /*
+     * Existing child IDs in the cloned Callout.
+     */
+    const existingIds =
+      new Set();
+
+    calloutWrapper
+      .querySelectorAll(
+        "[data-block-id]"
+      )
+      .forEach((child) => {
+        const id =
+          child.getAttribute(
+            "data-block-id"
+          );
+
+        if (id) {
+          existingIds.add(id);
+        }
       });
 
-      // Sort collected catalogue items by their heading's position in the doc.
-      const sortedItems = Array.from(collectedCatalogueItems.entries())
-        .sort((a, b) => {
-          const posA = headingOrder.has(a[0]) ? headingOrder.get(a[0]) : 999999;
-          const posB = headingOrder.has(b[0]) ? headingOrder.get(b[0]) : 999999;
-          return posA - posB;
-        });
+    const sortedChildren =
+      Array.from(
+        childMap.entries()
+      ).sort(
+        (a, b) =>
+          parseInt(a[0], 10) -
+          parseInt(b[0], 10)
+      );
 
-      // Remove existing items and placeholders, then re-insert sorted.
-      catList.querySelectorAll('.catalogue__list-item, .fixed-size-list-placeholder')
-        .forEach(el => el.remove());
-      for (const [, itemEl] of sortedItems) {
-        catList.appendChild(itemEl);
+    for (
+      const [
+        childId,
+        childEl
+      ] of sortedChildren
+    ) {
+      if (
+        existingIds.has(childId)
+      ) {
+        continue;
+      }
+
+      calloutWrapper.appendChild(
+        childEl
+      );
+    }
+  }
+
+  /*
+   * ------------------------------------------------------------------------
+   * Rebuild the main wrapper.
+   *
+   * IMPORTANT:
+   *
+   * We no longer infer nested blocks by:
+   *
+   *   parent.querySelectorAll('[data-block-id]')
+   *
+   * because that is not equivalent to logical Feishu block ownership.
+   *
+   * The main wrapper collection already contains only its direct children.
+   * The only blocks that need to be excluded from the top-level list are
+   * explicitly accumulated Callout children.
+   * ------------------------------------------------------------------------
+   */
+
+  const nestedBlockIds =
+    new Set();
+
+  for (
+    const childMap of
+      calloutChildren.values()
+  ) {
+    for (
+      const childId of childMap.keys()
+    ) {
+      nestedBlockIds.add(
+        childId
+      );
+    }
+  }
+
+  if (
+    wrapper &&
+    collectedBlocks.size > 0
+  ) {
+    const sortedEntries =
+      Array.from(
+        collectedBlocks.entries()
+      ).sort(
+        (a, b) =>
+          parseInt(a[0], 10) -
+          parseInt(b[0], 10)
+      );
+
+    wrapper.innerHTML = "";
+
+    const fragment =
+      document.createDocumentFragment();
+
+    for (
+      const [
+        blockId,
+        element
+      ] of sortedEntries
+    ) {
+      if (
+        nestedBlockIds.has(blockId)
+      ) {
+        continue;
+      }
+
+      fragment.appendChild(
+        element
+      );
+    }
+
+    wrapper.appendChild(
+      fragment
+    );
+  }
+
+  /*
+   * Return the collected blocks so later phases can use them if necessary.
+   */
+  return {
+    collectedBlocks,
+    calloutChildren,
+    collectedCatalogueItems,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Comment processing                                                         */
+/* -------------------------------------------------------------------------- */
+
+function findScrollableAncestor(element) {
+  if (!element) {
+    return null;
+  }
+
+  let current =
+    element.parentElement;
+
+  while (
+    current &&
+    current !== document.body &&
+    current !== document.documentElement
+  ) {
+    const style =
+      getComputedStyle(current);
+
+    const overflowY =
+      style.overflowY;
+
+    const canScroll =
+      (
+        overflowY === "auto" ||
+        overflowY === "scroll" ||
+        overflowY === "overlay"
+      ) &&
+      current.scrollHeight >
+        current.clientHeight + 1;
+
+    if (canScroll) {
+      return current;
+    }
+
+    current =
+      current.parentElement;
+  }
+
+  return null;
+}
+
+function findCommentScroller(card) {
+  if (!card) {
+    return null;
+  }
+
+  /*
+   * Prefer the closest actual scrollable ancestor.
+   */
+  const ancestor =
+    findScrollableAncestor(card);
+
+  if (ancestor) {
+    return ancestor;
+  }
+
+  /*
+   * Fallback: inspect known comment panel containers.
+   */
+  const panel =
+    card.closest(
+      ".js-panel-card-list, " +
+      ".doc-comment-v2, " +
+      ".comment-panel, " +
+      ".comments-panel"
+    );
+
+  if (panel) {
+    const candidates =
+      Array.from(
+        panel.querySelectorAll("*")
+      );
+
+    for (
+      const el of candidates
+    ) {
+      if (
+        el.scrollHeight >
+          el.clientHeight + 1
+      ) {
+        const style =
+          getComputedStyle(el);
+
+        if (
+          style.overflowY ===
+            "auto" ||
+          style.overflowY ===
+            "scroll" ||
+          style.overflowY ===
+            "overlay"
+        ) {
+          return el;
+        }
       }
     }
   }
 
-  // Phase 3: Expand all containers for capture.
-  // Set height:auto + overflow:visible so all content is visible.
-  // Keep display:flex — do NOT change to display:block.
-  const expandSelectors = [
-    'html, body',
-    '#mainBox',
-    '#mainContainer',
-    '.app-main-container',
-    '.app-main',
-    '.suite-body',
-    '.garr-container',
-    '.bear-web-x-container',
-  ];
-  for (const sel of expandSelectors) {
-    document.querySelectorAll(sel).forEach(el => {
-      el.style.setProperty('height', 'auto', 'important');
-      el.style.setProperty('overflow', 'visible', 'important');
-      el.style.setProperty('max-height', 'none', 'important');
+  return null;
+}
+
+async function processCommentViewport(
+  root
+) {
+  if (!root) {
+    return;
+  }
+
+  const images =
+    getImages(root);
+
+  if (images.length === 0) {
+    return;
+  }
+
+  await prepareViewport(root);
+
+  await convertImagesInElement(
+    root
+  );
+}
+
+async function processFeishuComments() {
+  const cards =
+    () =>
+      Array.from(
+        document.querySelectorAll(
+          ".js-panel-card"
+        )
+      );
+
+  /*
+   * No comments -> nothing to do.
+   */
+  if (cards().length === 0) {
+    return;
+  }
+
+  /*
+   * Find the independent comment scroll container.
+   *
+   * The first card is usually enough to locate it.
+   */
+  let firstCard =
+    cards()[0];
+
+  let commentScroller =
+    findCommentScroller(
+      firstCard
+    );
+
+  /*
+   * If cards are initially mounted but their scroller is not yet established,
+   * give Feishu a moment to finish mounting the panel.
+   */
+  if (!commentScroller) {
+    await sleep(300);
+
+    firstCard =
+      cards()[0];
+
+    if (firstCard) {
+      commentScroller =
+        findCommentScroller(
+          firstCard
+        );
+    }
+  }
+
+  /*
+   * Without a detectable independent scroller, process all currently mounted
+   * cards. This is still useful for comments whose list isn't virtualized.
+   */
+  if (!commentScroller) {
+    for (
+      const card of cards()
+    ) {
+      await processCommentViewport(
+        card
+      );
+    }
+
+    return;
+  }
+
+  commentScroller.scrollTop = 0;
+
+  await sleep(
+    INITIAL_RENDER_DELAY
+  );
+
+  const processedCards =
+    new Set();
+
+  let totalScroll =
+    commentScroller.scrollHeight;
+
+  const step =
+    Math.max(
+      Math.floor(
+        commentScroller.clientHeight *
+          0.7
+      ),
+      150
+    );
+
+  /*
+   * Multiple passes are intentional:
+   *
+   * comment virtualization can change scrollHeight as cards mount.
+   */
+  for (
+    let pass = 0;
+    pass < 4;
+    pass++
+  ) {
+    for (
+      let y = 0;
+      y <= totalScroll + 1000;
+      y += step
+    ) {
+      commentScroller.scrollTop =
+        y;
+
+      await sleep(
+        SCROLL_RENDER_DELAY
+      );
+
+      if (
+        commentScroller.scrollHeight >
+        totalScroll
+      ) {
+        totalScroll =
+          commentScroller.scrollHeight;
+      }
+
+      const mountedCards =
+        cards();
+
+      for (
+        const card of mountedCards
+      ) {
+        /*
+         * Process every currently mounted card.
+         *
+         * Even previously processed cards are checked again if they still
+         * contain an image that needs attention.
+         */
+        const cardKey =
+          card.getAttribute(
+            "data-comment-id"
+          ) ||
+          card.getAttribute(
+            "data-id"
+          ) ||
+          card;
+
+        const needsProcessing =
+          !processedCards.has(
+            cardKey
+          ) ||
+          hasImagesNeedingAttention(
+            card
+          );
+
+        if (!needsProcessing) {
+          continue;
+        }
+
+        await processCommentViewport(
+          card
+        );
+
+        if (
+          !hasImagesNeedingAttention(
+            card
+          )
+        ) {
+          processedCards.add(
+            cardKey
+          );
+        }
+      }
+    }
+
+    commentScroller.scrollTop =
+      totalScroll;
+
+    await sleep(
+      SCROLL_RENDER_DELAY
+    );
+
+    const mountedCards =
+      cards();
+
+    for (
+      const card of mountedCards
+    ) {
+      const cardKey =
+        card.getAttribute(
+          "data-comment-id"
+        ) ||
+        card.getAttribute(
+          "data-id"
+        ) ||
+        card;
+
+      await processCommentViewport(
+        card
+      );
+
+      if (
+        !hasImagesNeedingAttention(
+          card
+        )
+      ) {
+        processedCards.add(
+          cardKey
+        );
+      }
+    }
+
+    /*
+     * If another pass doesn't reveal anything new and no mounted card has
+     * unresolved images, we can stop.
+     */
+    if (
+      processedCards.size ===
+      cards().length &&
+      !cards().some(
+        (card) =>
+          hasImagesNeedingAttention(
+            card
+          )
+      )
+    ) {
+      /*
+       * One extra pass is deliberately not performed here.
+       * The outer loop already provides sufficient coverage.
+       */
+      break;
+    }
+  }
+
+  /*
+   * Restore the comment panel's top position.
+   */
+  commentScroller.scrollTop = 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Legacy post-processing                                                     */
+/* -------------------------------------------------------------------------- */
+
+function fixLegacyTables() {
+  /*
+   * Merge orphaned table-cell text blocks.
+   *
+   * Feishu sometimes renders the content block of a table cell as a
+   * top-level block while the table cell itself is mounted.
+   */
+  document
+    .querySelectorAll(
+      ".docx-table-block"
+    )
+    .forEach((tableBlock) => {
+      const tds =
+        tableBlock.querySelectorAll(
+          'td[data-block-type="table_cell"]'
+        );
+
+      for (
+        const td of tds
+      ) {
+        const tdId =
+          td.getAttribute(
+            "data-block-id"
+          );
+
+        if (!tdId) {
+          continue;
+        }
+
+        const ruw =
+          td.querySelector(
+            ".render-unit-wrapper"
+          );
+
+        if (!ruw) {
+          continue;
+        }
+
+        if (
+          ruw.querySelector(
+            "[data-block-id]"
+          )
+        ) {
+          continue;
+        }
+
+        const textBlockId =
+          String(
+            parseInt(tdId, 10) + 1
+          );
+
+        /*
+         * Search the current document for the orphan.
+         *
+         * At this stage the top-level wrapper has already been rebuilt.
+         */
+        const textBlock =
+          document.querySelector(
+            `[data-block-id="${textBlockId}"].docx-text-block`
+          );
+
+        if (!textBlock) {
+          continue;
+        }
+
+        ruw.innerHTML = "";
+
+        ruw.appendChild(
+          textBlock
+        );
+      }
     });
+}
+
+function fixLegacyTableStyles() {
+  /*
+   * table width placeholder.
+   */
+  document
+    .querySelectorAll(
+      ".docx-table-block table.table"
+    )
+    .forEach((tbl) => {
+      const style =
+        tbl.getAttribute("style") ||
+        "";
+
+      const widthMatch =
+        style.match(
+          /width:\s*(\d+(?:\.\d+)?)px/
+        );
+
+      if (
+        widthMatch &&
+        parseFloat(
+          widthMatch[1]
+        ) < 50
+      ) {
+        tbl.style.removeProperty(
+          "width"
+        );
+      }
+    });
+
+  /*
+   * scrollable wrapper.
+   */
+  document
+    .querySelectorAll(
+      ".docx-table-block .scrollable-wrapper"
+    )
+    .forEach((el) => {
+      const width =
+        el.style.width;
+
+      if (
+        !width ||
+        width === "0px"
+      ) {
+        el.style.setProperty(
+          "width",
+          "fit-content",
+          "important"
+        );
+      }
+
+      if (
+        el.style.left &&
+        el.style.left !== "0px"
+      ) {
+        el.style.removeProperty(
+          "left"
+        );
+      }
+    });
+
+  /*
+   * scrollable container.
+   */
+  document
+    .querySelectorAll(
+      ".docx-table-block .scrollable-container"
+    )
+    .forEach((el) => {
+      const width =
+        el.style.width;
+
+      if (
+        !width ||
+        width === "0px"
+      ) {
+        el.style.setProperty(
+          "width",
+          "fit-content",
+          "important"
+        );
+      }
+    });
+
+  /*
+   * content scroller.
+   */
+  document
+    .querySelectorAll(
+      ".docx-table-block .content-scroller"
+    )
+    .forEach((el) => {
+      el.style.setProperty(
+        "overflow",
+        "visible",
+        "important"
+      );
+
+      el.style.setProperty(
+        "max-width",
+        "none",
+        "important"
+      );
+    });
+
+  /*
+   * table horizontal position.
+   */
+  document
+    .querySelectorAll(
+      ".scrollable-item"
+    )
+    .forEach((el) => {
+      if (
+        el.style.left &&
+        el.style.left !== "0px"
+      ) {
+        el.style.setProperty(
+          "left",
+          "0px",
+          "important"
+        );
+      }
+    });
+}
+
+function fixLegacyImageStyles() {
+  document
+    .querySelectorAll(
+      ".docx-image-block " +
+      ".image-block-width-wrapper"
+    )
+    .forEach((el) => {
+      const width =
+        el.style.width;
+
+      if (!width) {
+        return;
+      }
+
+      const match =
+        width.match(
+          /^(\d+(?:\.\d+)?)px$/
+        );
+
+      if (
+        match &&
+        parseFloat(
+          match[1]
+        ) > 1000
+      ) {
+        el.style.removeProperty(
+          "width"
+        );
+      }
+    });
+}
+
+function cleanupVirtualArtifacts() {
+  /*
+   * Empty paragraphs.
+   */
+  document
+    .querySelectorAll(
+      "[data-block-id].isEmpty"
+    )
+    .forEach((el) => {
+      el.remove();
+    });
+
+  /*
+   * Virtual placeholders.
+   */
+  document
+    .querySelectorAll(
+      ".bear-virtual-renderUnit-placeholder"
+    )
+    .forEach((el) => {
+      el.remove();
+    });
+
+  document
+    .querySelectorAll(
+      ".bear-virtual-pre-renderer"
+    )
+    .forEach((el) => {
+      el.remove();
+    });
+
+  document
+    .querySelectorAll(
+      ".adit-virtual-scroll-placeholder, " +
+      ".fixed-size-list-placeholder"
+    )
+    .forEach((el) => {
+      el.remove();
+    });
+}
+
+function rebuildCatalogue(
+  collectedCatalogueItems
+) {
+  if (
+    !collectedCatalogueItems ||
+    collectedCatalogueItems.size === 0
+  ) {
+    return;
   }
 
-  // #mainContainer has position:absolute which takes it out of flow,
-  // causing body to collapse to ~2px. Set to static so body gets full height.
-  const mainContainer = document.querySelector('#mainContainer');
+  const catList =
+    document.querySelector(
+      ".catalogue__list"
+    );
+
+  if (!catList) {
+    return;
+  }
+
+  /*
+   * Build heading order from the already rebuilt document.
+   */
+  const headingOrder =
+    new Map();
+
+  document
+    .querySelectorAll(
+      '[data-block-type^="heading"]'
+    )
+    .forEach((heading) => {
+      const rid =
+        heading.getAttribute(
+          "data-record-id"
+        );
+
+      if (rid) {
+        headingOrder.set(
+          rid,
+          headingOrder.size
+        );
+      }
+    });
+
+  const sortedItems =
+    Array.from(
+      collectedCatalogueItems.entries()
+    ).sort((a, b) => {
+      const posA =
+        headingOrder.has(a[0])
+          ? headingOrder.get(a[0])
+          : 999999;
+
+      const posB =
+        headingOrder.has(b[0])
+          ? headingOrder.get(b[0])
+          : 999999;
+
+      return posA - posB;
+    });
+
+  catList
+    .querySelectorAll(
+      ".catalogue__list-item, " +
+      ".fixed-size-list-placeholder"
+    )
+    .forEach((el) => {
+      el.remove();
+    });
+
+  for (
+    const [, itemEl]
+      of sortedItems
+  ) {
+    catList.appendChild(
+      itemEl
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Final image pass                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function finalImagePass() {
+  /*
+   * After rebuilding the DOM, some image nodes may have been cloned into
+   * their final position. Run one final conversion pass before SingleFile
+   * takes the snapshot.
+   */
+  const roots = [
+    document.querySelector(
+      ".bear-web-x-container"
+    ),
+    document.querySelector(
+      "#innerdocbody"
+    ),
+  ].filter(Boolean);
+
+  for (
+    const root of roots
+  ) {
+    const images =
+      getImages(root);
+
+    if (images.length === 0) {
+      continue;
+    }
+
+    /*
+     * Don't wait 3s here unless there is actually an unresolved image.
+     */
+    if (
+      hasImagesNeedingAttention(root)
+    ) {
+      await prepareViewport(root);
+    }
+
+    await convertImagesInElement(
+      root
+    );
+  }
+
+  /*
+   * Comments may now contain their final cloned image nodes.
+   */
+  const commentCards =
+    document.querySelectorAll(
+      ".js-panel-card"
+    );
+
+  for (
+    const card of commentCards
+  ) {
+    if (
+      hasImagesNeedingAttention(card)
+    ) {
+      await prepareViewport(card);
+    }
+
+    await convertImagesInElement(
+      card
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Layout expansion                                                           */
+/* -------------------------------------------------------------------------- */
+
+function expandForCapture() {
+  const expandSelectors = [
+    "html, body",
+    "#mainBox",
+    "#mainContainer",
+    ".app-main-container",
+    ".app-main",
+    ".suite-body",
+    ".garr-container",
+    ".bear-web-x-container",
+  ];
+
+  for (
+    const sel of expandSelectors
+  ) {
+    document
+      .querySelectorAll(sel)
+      .forEach((el) => {
+        el.style.setProperty(
+          "height",
+          "auto",
+          "important"
+        );
+
+        el.style.setProperty(
+          "overflow",
+          "visible",
+          "important"
+        );
+
+        el.style.setProperty(
+          "max-height",
+          "none",
+          "important"
+        );
+      });
+  }
+
+  /*
+   * mainContainer is absolute in the live application.
+   * Keep it in normal flow for the snapshot.
+   */
+  const mainContainer =
+    document.querySelector(
+      "#mainContainer"
+    );
+
   if (mainContainer) {
-    mainContainer.style.setProperty('position', 'static', 'important');
+    mainContainer.style.setProperty(
+      "position",
+      "static",
+      "important"
+    );
   }
 
-  // .app-main has min-width:200px which constrains the content width.
-  const appMain = document.querySelector('.app-main');
+  const appMain =
+    document.querySelector(
+      ".app-main"
+    );
+
   if (appMain) {
-    appMain.style.setProperty('min-width', '0', 'important');
-    appMain.style.setProperty('width', 'auto', 'important');
+    appMain.style.setProperty(
+      "min-width",
+      "0",
+      "important"
+    );
+
+    appMain.style.setProperty(
+      "width",
+      "auto",
+      "important"
+    );
   }
 
-  // Show the TOC (catalogue). In the original page, .catalogue-container is
-  // position:absolute (floating above content). We keep it absolute so it
-  // doesn't take up vertical space in the document flow — otherwise the
-  // content gets pushed down by the catalogue's height, creating a large
-  // blank gap above the text.
-  const catContainer = document.querySelector('.catalogue-container');
+  /*
+   * Catalogue.
+   */
+  const catContainer =
+    document.querySelector(
+      ".catalogue-container"
+    );
+
   if (catContainer) {
-    catContainer.style.setProperty('height', 'auto', 'important');
-    catContainer.style.setProperty('overflow', 'visible', 'important');
-    catContainer.style.setProperty('position', 'absolute', 'important');
-    // Remove any top offset (e.g. top:-46px) that was set by React.
-    catContainer.style.setProperty('top', '0', 'important');
-  }
- const cat = document.querySelector('.catalogue');
- if (cat) {
-   cat.style.setProperty('position', 'static', 'important');
-   cat.style.setProperty('height', 'auto', 'important');
- }
+    catContainer.style.setProperty(
+      "height",
+      "auto",
+      "important"
+    );
 
-  // Remove max-height on catalogue__scroller — React sets it to the
-  // viewport height at capture time, truncating the TOC for long documents.
-  const catScroller = document.querySelector('.catalogue__scroller');
+    catContainer.style.setProperty(
+      "overflow",
+      "visible",
+      "important"
+    );
+
+    catContainer.style.setProperty(
+      "position",
+      "absolute",
+      "important"
+    );
+
+    catContainer.style.setProperty(
+      "top",
+      "0",
+      "important"
+    );
+  }
+
+  const cat =
+    document.querySelector(
+      ".catalogue"
+    );
+
+  if (cat) {
+    cat.style.setProperty(
+      "position",
+      "static",
+      "important"
+    );
+
+    cat.style.setProperty(
+      "height",
+      "auto",
+      "important"
+    );
+  }
+
+  const catScroller =
+    document.querySelector(
+      ".catalogue__scroller"
+    );
+
   if (catScroller) {
-    catScroller.style.setProperty('max-height', 'none', 'important');
-    catScroller.style.setProperty('overflow', 'visible', 'important');
+    catScroller.style.setProperty(
+      "max-height",
+      "none",
+      "important"
+    );
+
+    catScroller.style.setProperty(
+      "overflow",
+      "visible",
+      "important"
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* New Feishu section navigation                                              */
+/* -------------------------------------------------------------------------- */
+
+async function processSectionNav() {
+  const nav = document.querySelector(
+    ".section-nav-container .section-nav"
+  );
+
+  const scroller = nav?.querySelector(
+    ".entries-container"
+  );
+
+  const list = scroller?.querySelector(
+    "ul.full-entries"
+  );
+
+  if (!nav || !scroller || !list) {
+    return;
   }
 
- // Wait for layout reflow before capture.
- await new Promise(r => setTimeout(r, 500));
+  /*
+   * Feishu virtualizes the left document outline independently from the
+   * document body.  Collect every mounted entry first, while keeping the
+   * original scrolling element untouched during the scan.
+   */
+  const collected = new Map();
+
+  const collectVisibleEntries = () => {
+    list
+      .querySelectorAll("li.full-entry[data-guid]")
+      .forEach((item) => {
+        const guid = item.getAttribute("data-guid");
+
+        if (guid && !collected.has(guid)) {
+          collected.set(guid, item.cloneNode(true));
+        }
+      });
+  };
+
+  scroller.scrollTop = 0;
+  await sleep(INITIAL_RENDER_DELAY);
+  collectVisibleEntries();
+
+  let totalScroll = scroller.scrollHeight;
+  const step = Math.max(
+    Math.floor(scroller.clientHeight * 0.7),
+    100
+  );
+
+  let lastCount = -1;
+
+  /*
+   * A few passes are intentional.  Some Feishu versions update the virtual
+   * list's scrollHeight only after the newly visible entries have mounted.
+   */
+  for (
+    let pass = 0;
+    pass < 5 && collected.size !== lastCount;
+    pass++
+  ) {
+    lastCount = collected.size;
+
+    for (
+      let y = 0;
+      y <= totalScroll + 1000;
+      y += step
+    ) {
+      scroller.scrollTop = y;
+      await sleep(SCROLL_RENDER_DELAY);
+
+      if (scroller.scrollHeight > totalScroll) {
+        totalScroll = scroller.scrollHeight;
+      }
+
+      collectVisibleEntries();
+    }
+
+    scroller.scrollTop = totalScroll;
+    await sleep(SCROLL_RENDER_DELAY);
+    collectVisibleEntries();
+  }
+
+  if (collected.size === 0) {
+    scroller.scrollTop = 0;
+    return;
+  }
+
+  /*
+   * Replace the virtualized list with the complete set of entries.
+   */
+  list.replaceChildren(
+    ...Array.from(collected.values())
+  );
+
+  /*
+   * The original .entries-container is controlled by Feishu's virtual
+   * scrolling implementation (PerfectScrollbar in the current renderer).
+   * Merely inserting all <li> elements is not enough: its cached scroll
+   * metrics still describe the virtual list, so the resulting SingleFile
+   * snapshot can contain all entries in HTML while the visible catalogue
+   * itself cannot be scrolled.
+   *
+   * Clone the completed container and replace the original node.  This
+   * deliberately detaches Feishu's virtual-scroll listeners/instance and
+   * turns the catalogue into an ordinary native scroll container.
+   */
+  const viewportHeight =
+    scroller.clientHeight ||
+    nav.clientHeight ||
+    parseFloat(getComputedStyle(nav).maxHeight) ||
+    598;
+
+  const replacement = scroller.cloneNode(true);
+
+  replacement
+    .querySelectorAll(
+      ".ps__rail-x, .ps__rail-y"
+    )
+    .forEach((el) => el.remove());
+
+  replacement.classList.remove(
+    "ps",
+    "ps--active-y",
+    "ps--active-x"
+  );
+
+  replacement.style.setProperty(
+    "height",
+    `${viewportHeight}px`,
+    "important"
+  );
+
+  replacement.style.setProperty(
+    "max-height",
+    `${viewportHeight}px`,
+    "important"
+  );
+
+  replacement.style.setProperty(
+    "overflow-y",
+    "auto",
+    "important"
+  );
+
+  replacement.style.setProperty(
+    "overflow-x",
+    "hidden",
+    "important"
+  );
+
+  replacement.style.setProperty(
+    "overscroll-behavior",
+    "contain",
+    "important"
+  );
+
+  scroller.replaceWith(replacement);
+
+  replacement.scrollTop = 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Main                                                                       */
+/* -------------------------------------------------------------------------- */
+
+async function before(url, config) {
+  /*
+   * Wait for either Feishu renderer to appear.
+   */
+  await waitForSelector(
+    ".render-unit-wrapper, " +
+    ".page-block.root-block, " +
+    "#innerdocbody, " +
+    ".etherpad-container-wrapper",
+    30000
+  );
+
+  /*
+   * Newer renderer.
+   */
+  const newScroller =
+    document.querySelector(
+      ".etherpad-container-wrapper"
+    );
+
+  const newWrapper =
+    document.querySelector(
+      "#innerdocbody"
+    );
+
+  let legacyResult = null;
+
+  /*
+   * The section navigation is a separate virtual list.  Materialize it
+   * before touching the document body, then detach its virtual-scroll
+   * implementation so it cannot interfere with later body collection.
+   */
+  await processSectionNav();
+
+  if (
+    newScroller &&
+    newWrapper
+  ) {
+    await collectNewFeishu(
+      newScroller,
+      newWrapper
+    );
+  } else {
+    /*
+     * Legacy renderer.
+     */
+    const scroller =
+      document.querySelector(
+        ".bear-web-x-container"
+      );
+
+    if (!scroller) {
+      /*
+       * Fallback for pages that use normal window scrolling.
+       */
+      for (
+        let i = 0;
+        i < 200;
+        i++
+      ) {
+        window.scrollBy(
+          0,
+          window.innerHeight
+        );
+
+        await sleep(100);
+
+        if (
+          window.innerHeight +
+            window.scrollY >=
+          document.body.scrollHeight
+        ) {
+          break;
+        }
+      }
+
+      window.scrollTo(
+        0,
+        0
+      );
+
+      await sleep(
+        INITIAL_RENDER_DELAY
+      );
+    } else {
+      const wrapper =
+        findMainLegacyWrapper(
+          scroller
+        );
+
+      if (wrapper) {
+        legacyResult =
+          await collectLegacyFeishu(
+            scroller,
+            wrapper
+          );
+      }
+    }
+  }
+
+  /*
+   * Comments are independent from the body virtual list.
+   */
+  await processFeishuComments();
+
+  /*
+   * Legacy-specific repairs.
+   */
+  if (legacyResult) {
+    fixLegacyTables();
+    fixLegacyTableStyles();
+    fixLegacyImageStyles();
+
+    rebuildCatalogue(
+      legacyResult.collectedCatalogueItems
+    );
+  }
+
+  /*
+   * Remove virtual DOM artifacts.
+   */
+  cleanupVirtualArtifacts();
+
+  /*
+   * Final image conversion.
+   */
+  await finalImagePass();
+
+  /*
+   * Expand layout only AFTER all virtual scrolling and image work is done.
+   */
+  expandForCapture();
+
+  /*
+   * Give the browser one layout frame before SingleFile captures.
+   */
+  await sleep(500);
 }

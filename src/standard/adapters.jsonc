@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -10,12 +10,15 @@
     "mp.weixin.qq.com": { "snapshot": { "remove_elements": [".swiper_indicator_wrp_pc"], "process_carousels": ".share_media_swiper" } },
     "*.feishu.cn": {
       "defaults": { "timeout": 600 },
-      "metadata": { "scripts": [{ "path": "./scripts/feishu/feishu_metadata.py", "hook": "replace" }], "rewrite_title": [" - 飞书云文档$", ""] },
+      "metadata": {
+        "http": { "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" },
+        "scripts": [{ "path": "./scripts/feishu/feishu_metadata.py", "hook": "replace" }]
+      },
       "snapshot": {
-        "wait_elements": [".page-block.root-block"],
-        "wait_elements_timeout": 30,
+        "wait_elements": [".page-block.root-block", "#innerdocbody .ace-line"],
+        "wait_elements_timeout": 10,
         "scripts": [{ "path": "./scripts/feishu/feishu_snapshot.js", "hook": "before" }],
-        "remove_elements": [ ".navigation-bar__left",".suite-header",".ssrWaterMark",".document-bottom-slot",".layer-popup",".suspension-comment-area","button" ],
+        "remove_elements": [ ".navigation-bar__left",".suite-header",".ssrWaterMark",".document-bottom-slot",".layer-popup",".suspension-comment-area",".adit-virtual-scroll-placeholder",".adit-virtual-pre-renderer",".slab-pre-renderer","[data-selector=\"image-loading-view\"]","button", ".ud__portal" ],
         "set_styles": {
           "html, body": { "overflow": "visible !important", "height": "auto !important" },
           "#mainBox": { "height": "auto !important", "overflow": "visible !important" },
@@ -25,13 +28,19 @@
           ".suite-body": { "height": "auto !important", "overflow": "visible !important", "width": "auto !important" },
           ".garr-container": { "height": "auto !important", "overflow": "visible !important", "width": "auto !important" },
           ".bear-web-x-container": { "overflow": "visible !important", "height": "auto !important", "maxHeight": "none !important", "width": "auto !important" },
+          ".etherpad-container-wrapper": { "overflow": "visible !important", "height": "auto !important", "maxHeight": "none !important" },
+          "#innerdocbodyWrap": { "overflow": "visible !important", "height": "auto !important" },
+          "#innerdocbody": { "overflow": "visible !important", "height": "auto !important" },
+          ".doc-comment-v2": { "overflow": "visible !important", "height": "auto !important", "maxHeight": "none !important" },
+          ".comment-container__8vLlN": { "overflow": "visible !important", "height": "auto !important" },
+          ".js-panel-card": { "position": "static !important", "top": "auto !important", "left": "auto !important", "transform": "none !important", "opacity": "1 !important", "visibility": "visible !important" },
           ".catalogue-container": { "height": "auto !important", "overflow": "visible !important", "position": "absolute !important", "top": "0 !important" },
           ".catalogue": { "position": "static !important", "height": "auto !important" },
           ".catalogue__scroller": { "max-height": "none !important", "overflow": "visible !important" }
         },
         "singlefile_args": { "--browser-wait-delay": "3000", "--browser-capture-max-time": "600000", "--remove-hidden-elements": false, "--remove-unused-fonts": true, "--remove-frames": true, "--remove-no-script-tags": true }
       },
-      "reader": { "defuddle_args": { "contentSelector": [".page-block.root-block", ".docx-page-block"] } }
+      "reader": { "defuddle_args": { "contentSelector": [".editor-container"], "removePartialSelectors": false } }
     },
     "www.zhihu.com": {
       "auth": { "cookie": { "type": "auto", "verify": { "content_check": { "invalid_patterns": ["安全验证"] } }, "refresh": { "wait_cookie": "z_c0" } } },
