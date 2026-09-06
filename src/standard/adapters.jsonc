@@ -64,6 +64,9 @@
     "www.twitter.com": { "type": "alias", "target": "x.com" },
     "www.x.com": { "type": "alias", "target": "x.com" },
     "x.com": {
+      "metadata": {
+        "rewrite_title": [[" on X", ""], [" https://t\\.co.*$", ""]],
+      },
       "snapshot": {
         "singlefile_args": { "--blocked-URL-pattern": ["\\.js$"], "--remove-unused-styles": "false" },
         "remove_elements": ["header", "[data-testid='sidebarColumn']", "footer", "aside", "div[aria-hidden='true']"]
