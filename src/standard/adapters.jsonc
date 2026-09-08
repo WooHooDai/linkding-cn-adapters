@@ -65,7 +65,7 @@
     "www.x.com": { "type": "alias", "target": "x.com" },
     "x.com": {
       "metadata": {
-        "rewrite_title": [[" on X", ""], [" https://t\\.co.*$", ""]],
+        "rewrite_title": [[" on X", ""], [" https://t\\.co.*$", ""], ["^\\(.*\\) ", ""]],
       },
       "snapshot": {
         "singlefile_args": { "--blocked-URL-pattern": ["\\.js$"], "--remove-unused-styles": "false" },
