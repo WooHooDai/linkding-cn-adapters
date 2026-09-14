@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.11",
+    "version": "0.1.12",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -45,7 +45,11 @@
     "*.xiaohongshu.com": { "type": "alias", "target": "xhslink.com" },
     "xhslink.cn": { "type": "alias", "target": "xhslink.com" },
     "xhslink.com": {
-      "metadata": { "select_image": ["meta:nth-child(2 of [property='og:image'])"], "rewrite_title": [[" - 小红书$", ""]] },
+      "metadata": {
+        "http": { "User-Agent": "" },
+        "select_image": ["meta:nth-child(2 of [property='og:image'])"],
+        "rewrite_title": [[" - 小红书$", ""]]
+      },
       "snapshot": {
         "keep_elements": ["#noteContainer"],
         "remove_elements": ["div[elementtiming='note-cover']", ".note-detail-follow-btn", ".comments-login"],
