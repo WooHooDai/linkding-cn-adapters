@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.12",
+    "version": "0.1.13",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -28,7 +28,7 @@
       }
     },
     "www.zhihu.com": {
-      "auth": { "cookie": { "type": "auto", "verify": { "content_check": { "invalid_patterns": ["安全验证"] } }, "refresh": { "wait_cookie": "z_c0" } } },
+      "auth": { "cookie": { "type": "auto", "verify": { "http_head_probe": { "enabled": false }, "content_check": { "invalid_patterns": ["安全验证"] } }, "refresh": { "wait_cookie": "__zse_ck" } } },
       "defaults": { "timeout": 30 },
       "metadata": { "select_title": ["meta[property='og:title']"], "select_description": ["meta[property='og:description']"], "select_image": [".RichText img"] },
       "snapshot": {
