@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.15",
+    "version": "0.1.16",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -45,6 +45,10 @@
     "*.xiaohongshu.com": { "type": "alias", "target": "xhslink.com" },
     "xhslink.cn": { "type": "alias", "target": "xhslink.com" },
     "xhslink.com": {
+      "health": {
+        "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_8_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15" },
+        "http_head_probe": { "invalid_location_patterns": ["/login", "/signin", "/auth", "/passport", "/accounts"] }
+      },
       "metadata": {
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_8_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15" },
         "select_image": ["meta:nth-child(2 of [property='og:image'])"],
@@ -78,24 +82,16 @@
       "reader": { "defuddle_args": { "contentSelector": ["[id^='urt:conversation']"], "removeContentPatterns": false, "removeLowScoring": false } }
     },
     "www.reddit.com": {
-      "auth": { "cookie": { "type": "auto", "refresh": { "url": "https://www.reddit.com", "wait_cookie": "loid", "timeout": 30, "user_data_dir": "default" }, "verify": { "http_head_probe": {"enabled": false}, "content_check": { "enabled": false} } } },
       "metadata": {
-        "content_type": "json",
-        "request_url": ["^(.*?)/?(?:\\?.*)?$", "\\1/.json"],
-        "select_title": ["$[0].data.children[0].data.title"],
-        "select_description": ["$[0].data.children[0].data.selftext"],
-        "select_image": ["$[0].data.children[0].data.thumbnail"],
-        "rewrite_image": [
-          ["^https://preview\\.redd\\.it/([^?]+).*$", "https://i.redd.it/\\1"],
-          ["^.*/(?:self|default|nsfw|spoiler)$", ""]
-        ],
-        "scripts": [{ "path": "./scripts/reddit/reddit_metadata.py", "hook": "replace", "timeout": 60 }]
+        "scripts": [{ "path": "./scripts/reddit/reddit_metadata.py", "hook": "replace", "timeout": 30 }]
       },
       "snapshot": {
+        "auth": { "cookie": { "type": "login", "verify": { "http_head_probe": {"enabled": false}, "content_check": { "enabled": false} } } },
         "timeout": 60,
         "content_type": "html",
         "process_carousels": ["div[slot='post-media-container']"],
         "scripts": [
+          { "path": "./scripts/reddit/reddit_snapshot.py", "hook": "replace", "timeout": 90 },
           { "path": "./scripts/reddit/reddit_before.js", "hook": "before" },
           { "path": "./scripts/reddit/reddit_after.js", "hook": "after" }
         ],
