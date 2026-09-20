@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.16",
+    "version": "0.1.17",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -41,6 +41,26 @@
         "scripts": [{ "path": "./scripts/zhihu/zhihu.js", "hook": "before" }]
       },
       "reader": { "defuddle_args": { "contentSelector": [".RichText"] } }
+    },
+    "zhuanlan.zhihu.com": {
+      // 专栏文章页：内容要求登录态，auto cookie 无法解决，必须用户手动粘贴登录 cookie
+      "auth": {
+        "cookie": {
+          "type": "login",
+          "verify": {
+            "http_head_probe": { "enabled": false },
+            "content_check": {
+              "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "登录后"]
+            }
+          }
+        }
+      },
+      "defaults": { "timeout": 30, "http_engine": "curl_cffi" },
+      "snapshot": {
+        "keep_elements": [".Post-Header", ".Post-RichTextContainer"],
+        "remove_elements": [".Post-SideBar", ".Post-TopBar", ".Post-NavMenu", ".Post-Comment"]
+      },
+      "reader": { "defuddle_args": { "contentSelector": [".Post-RichTextContainer"] } }
     },
     "*.xiaohongshu.com": { "type": "alias", "target": "xhslink.com" },
     "xhslink.cn": { "type": "alias", "target": "xhslink.com" },
