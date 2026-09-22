@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.17",
+    "version": "0.1.18",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -148,14 +148,20 @@
     "web.okjike.com": {
       "metadata": {
         "load_full_page": true,
-        "request_url": ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
+        "request_url": [
+          ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
+          ["https://web\\.okjike\\.com/originalPost/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"]
+        ],
         "select_title": ["title"],
         "select_description": [".jsx-1330250023.text"],
         "rewrite_title": [[" - 即刻App$", ""]],
         "rewrite_image": [["\\?.*$", ""]]
       },
       "snapshot": {
-        "request_url": ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
+        "request_url": [
+          ["https://web\\.okjike\\.com/u/[^/]+/post/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"],
+          ["https://web\\.okjike\\.com/originalPost/([^/?#]+).*", "https://m.okjike.com/originalPosts/\\1"]
+        ],
         "keep_elements": ["div.post-page"],
       }
     },
