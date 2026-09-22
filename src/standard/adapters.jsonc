@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.19",
+    "version": "0.1.20",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -115,7 +115,7 @@
           { "path": "./scripts/reddit/reddit_before.js", "hook": "before" },
           { "path": "./scripts/reddit/reddit_after.js", "hook": "after" }
         ],
-        "remove_elements": ["button[aria-label='Back']", "pdp-back-button", "button[aria-label='Open user actions']", "button[aria-label='Share']", "shreddit-async-loader[bundlename='status_icons']", "shreddit-comment[author='AutoModerator']", "shreddit-comment-action-row", "div[slot='actionRow']", "comment-body-header", "shreddit-comment-badges", "shreddit-comment-tree-ad", "shreddit-comments-page-ad", "#pdp-credit-bar > span.flex.items-center.ps-xs", "#pdp-credit-bar shreddit-async-loader", "#pdp-credit-bar shreddit-brand-affiliate-tag", "shreddit-header", "shreddit-sidebar", "reddit-sidebar-nav", "shreddit-subreddit-sidebar", "faceplate-search-input", "comment-composer-host", "shreddit-composer", "reddit-rte", "rte-toolbar", "rte-toolbar-button", "shreddit-comments-sort-dropdown", "shreddit-sort-dropdown", "shreddit-good-visit-tracker", "shreddit-seo-good-visit-tracker", "devvit-wrapper", "reputation-recaptcha", "alert-controller", "div.threadline-strip"],
+        "remove_elements": ["button[aria-label='Back']", "pdp-back-button", "button[aria-label='Open user actions']", "button[aria-label='Share']", "shreddit-async-loader[bundlename='status_icons']", "shreddit-comment[author='AutoModerator']", "shreddit-comment-action-row", "div[slot='actionRow']", "comment-body-header", "shreddit-comment-badges", "shreddit-comment-tree-ad", "shreddit-comments-page-ad", "#pdp-credit-bar > span.flex.items-center.ps-xs", "#pdp-credit-bar shreddit-async-loader", "#pdp-credit-bar shreddit-brand-affiliate-tag", "shreddit-header", "shreddit-sidebar", "reddit-sidebar-nav", "shreddit-subreddit-sidebar", "faceplate-search-input", "comment-composer-host", "shreddit-composer", "reddit-rte", "rte-toolbar", "rte-toolbar-button", "shreddit-comments-sort-dropdown", "shreddit-sort-dropdown", "shreddit-good-visit-tracker", "shreddit-seo-good-visit-tracker", "devvit-wrapper", "reputation-recaptcha", "alert-controller", "div.threadline-strip", "div[slot='post-media-container'] .lightboxed-content"],
         "wait_elements": ["[slot='text-body'] .md | .md", "span.avatar"],
         "wait_elements_timeout": 15,
         "keep_elements": ["main#main-content"],
