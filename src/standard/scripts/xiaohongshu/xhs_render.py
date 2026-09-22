@@ -10,9 +10,9 @@ def before(url, config):
 
     headers = config.get("headers") or {}
     user_agent = headers.get("User-Agent") or headers.get("user-agent") or (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/101.0.0.0 Safari/537.36"
+        # 小红书对 Chrome 系 UA 强制跳转登录页，仅放行 Safari/Firefox；
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_8_0) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15"
     )
 
     browser = launch_browser(headless=True)
