@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.24",
+    "version": "0.1.25",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -47,18 +47,17 @@
         "set_styles": { "html": { "overflow": "auto" }, ".RichContent-inner": { "maxHeight": "none", "overflow": "visible" }, ".ContentItem-actions": { "margin-top": "30px" } },
         "scripts": [{ "path": "./scripts/zhihu/zhihu.js", "hook": "before" }]
       },
-      "reader": { "defuddle_args": { "contentSelector": [".RichText"] } }
+      "reader": { "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "zh-zse-ck", "您当前请求存在异常", "40362"] } } } }, "defuddle_args": { "contentSelector": [".RichText"] } }
     },
     "zhuanlan.zhihu.com": {
       "defaults": { "timeout": 30, "http_engine": "curl_cffi" },
-      "auth": {
-        "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "zh-zse-ck", "40362", "您当前请求存在异常"] } } }
-      },
       "health": {
+        "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "zh-zse-ck", "40362", "您当前请求存在异常"] } } } },
         "http_head_probe": { "enabled": true, "blocked_location_patterns": ["/login", "/signin", "/auth", "/passport", "/accounts", "/account/unhuman", "/unhuman"] },
         "content_check": { "enabled": true, "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "zh-zse-ck", "40362", "您当前请求存在异常", "没有知识存在的荒原"] }
       },
       "metadata": {
+        "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "zh-zse-ck", "40362", "您当前请求存在异常"] } } } },
         "select_title": ["meta[property='og:title']"],
         "select_description": ["meta[property='og:description']"],
         "select_image": [".Post-RichTextContainer img"]
@@ -67,7 +66,7 @@
         "keep_elements": [".Post-Header", ".Post-RichTextContainer"],
         "remove_elements": [".Post-SideBar", ".Post-TopBar", ".Post-NavMenu", ".Post-Comment", ".SignFlowModal", ".Modal-wrapper"]
       },
-      "reader": { "defuddle_args": { "contentSelector": [".Post-RichTextContainer"] } }
+      "reader": { "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "zh-zse-ck", "40362", "您当前请求存在异常"] } } } }, "defuddle_args": { "contentSelector": [".Post-RichTextContainer"] } }
     },
     "*.xiaohongshu.com": { "type": "alias", "target": "xhslink.com" },
     "xhslink.cn": { "type": "alias", "target": "xhslink.com" },
