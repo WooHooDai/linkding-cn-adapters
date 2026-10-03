@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.23",
+    "version": "0.1.24",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -29,12 +29,15 @@
     },
     "www.zhihu.com": {
       "defaults": { "timeout": 30, "http_engine": "curl_cffi" },
-      "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "zh-zse-ck", "您当前请求存在异常", "40362"] } } } },
       "health": {
+        "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "zh-zse-ck", "您当前请求存在异常", "40362"] } } } },
         "http_head_probe": { "enabled": true, "blocked_location_patterns": ["/login", "/signin", "/auth", "/passport", "/accounts", "/account/unhuman", "/unhuman"] },
         "content_check": { "enabled": true, "invalid_patterns": ["安全验证", "网络环境存在异常", "开始验证", "zh-zse-ck", "40362", "您当前请求存在异常", "没有知识存在的荒原"] }
       },
-      "metadata": { "select_title": ["meta[property='og:title']"], "select_description": ["meta[property='og:description']"], "select_image": [".RichText img"] },
+      "metadata": {
+        "auth": { "cookie": { "enabled": true, "type": "auto", "refresh": { "wait_cookie": "__zse_ck" }, "verify": { "http_head_probe": { "enabled": true, "invalid_status": [401, 403], "invalid_location_patterns": ["/account/unhuman", "/unhuman", "/signin", "/login"] }, "content_check": { "invalid_patterns": ["安全验证", "zh-zse-ck", "您当前请求存在异常", "40362"] } } } },
+        "select_title": ["meta[property='og:title']"], "select_description": ["meta[property='og:description']"], "select_image": [".RichText img"]
+      },
       "snapshot": {
         "keep_elements": [".QuestionHeader", ".QuestionAnswer-content"],
         "remove_elements": [".ContentItem-expandButton", ".QuestionButtonGroup", ".QuestionHeaderActions > button", ".Popover", ".SignFlowModal", ".Modal-wrapper", ".Question-mainColumnLogin"],
