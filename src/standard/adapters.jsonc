@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.25",
+    "version": "0.1.26",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -73,23 +73,28 @@
     "xhslink.com": {
       "health": {
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_8_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15" },
-        "http_head_probe": { "invalid_location_patterns": ["/login", "/signin", "/auth", "/passport", "/accounts"] }
+        "http_head_probe": { "blocked_location_patterns": ["/login", "/signin", "/auth", "/passport", "/accounts"] }
       },
       "metadata": {
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_8_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15" },
+        // 笔记的 og:* 元数据全部位于 <head> 内（已实测 body 中为 0），
+        // 因此只需读到 </head> 即可完成解析：非门控笔记请求体积
+        // 从 ~84KB 降到 ~20KB，门控笔记的“无效桌面请求”从 ~68KB 降到 ~13KB。
+        "load_full_page": false,
+        "scripts": [{ "path": "./scripts/xiaohongshu/xhs_metadata.py", "hook": "after", "timeout": 30 }],
         "select_image": ["meta:nth-child(2 of [property='og:image'])"],
         "rewrite_title": [[" - 小红书$", ""]]
       },
       "snapshot": {
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_8_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15" },
-        "keep_elements": ["#noteContainer"],
-        "remove_elements": ["div[elementtiming='note-cover']", ".note-detail-follow-btn", ".comments-login"],
+        "keep_elements": ["#noteContainer", ".narmal-note-container", ".comment-box"],
+        "remove_elements": ["div[elementtiming='note-cover']", ".note-detail-follow-btn", ".comments-login", ".login-container", ".login-reason", ".reds-modal", ".narmal-note-container .reds-button", ".share-layer", ".recommend-box", ".user-notes-box", "#fmp.bottom-button-box", ".safe-area-bottom.margin-placeholder", ".comment-outline-button"],
         "scripts": [
-          { "path": "./scripts/xiaohongshu/xhs_render.py", "hook": "before" },
+          { "path": "./scripts/xiaohongshu/xhs_render.py", "hook": "before", "timeout": 60 },
           { "path": "./scripts/xiaohongshu/xhs.js", "hook": "before" },
           { "path": "./scripts/xiaohongshu/xhs.js", "hook": "after" }
         ],
-        "process_carousels": [".media-container"],
+        "process_carousels": [".media-container", ".onix-carousel-container"],
         "toggles": { "video": { "selector": ".video-player-media.media-container", "default": true, "label": "保存视频" } },
         "singlefile_args": { "--blocked-URL-pattern": ["\\.js$"], "--block-videos": "true", "--remove-unused-styles": "false", "--browser-width": "1440", "--browser-height": "900" }
       },
