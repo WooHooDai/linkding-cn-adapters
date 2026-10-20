@@ -2,12 +2,15 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.1.28",
+    "version": "0.1.29",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
   "domains": {
-    "mp.weixin.qq.com": { "snapshot": { "remove_elements": [".swiper_indicator_wrp_pc"], "process_carousels": ".share_media_swiper", "singlefile_args": { "--group-duplicate-images": "false" } } },
+    "mp.weixin.qq.com": {
+      "defaults": { "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36" } },
+      "snapshot": { "remove_elements": [".swiper_indicator_wrp_pc"], "process_carousels": ".share_media_swiper", "singlefile_args": { "--group-duplicate-images": "false" } }
+    },
     "*.larkoffice.com": { "type": "alias", "target": "*.feishu.cn" },
     "*.feishu.cn": {
       "defaults": { "timeout": 600 },
