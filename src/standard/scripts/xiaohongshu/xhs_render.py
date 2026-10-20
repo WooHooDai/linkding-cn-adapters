@@ -1,31 +1,47 @@
 """Render the note in a real browser before SingleFile captures it.
 
-Xiaohongshu gates anonymous note views by **UA family**, not by session cookie.
-Measured on 2026-10: a Gecko/Firefox UA renders the note with no session at
-all; Chrome/Edge UAs are redirected to ``/login``; Safari-family UAs (desktop,
-iOS, Android) are redirected to ``/website-login/captcha?verifyType=217``, a
-slider challenge. The decision is made server-side after the page's risk SDK
-posts its device profile to ``as.xiaohongshu.com/api/sec/v1/shield/webprofile``
-and is not influenced by headless mode, a valid ``web_session``, or how
-consistent the UA is with the engine's own fingerprint (masking
-``sec-ch-ua``/``navigator.vendor`` while keeping a Safari UA still yields the
-slider).
+Xiaohongshu puts two independent gates in front of an anonymous note view, and
+both have to be satisfied:
 
-A ``web_session`` therefore buys nothing, and it cannot be warmed up either:
-the landing page ``https://www.xiaohongshu.com/`` is gated by the same rule,
-so the old warm-up-and-cache flow only added risk-scored requests. The hook
-now renders once with the configured Firefox UA — the only anonymous door
-left — and keeps a mobile UA as a last resort in case that changes back.
+1. **Session gate (server side).** Requests without a ``web_session`` cookie are
+   downgraded: the short link 302s from ``/discovery/item/<id>`` to
+   ``/explore?target_note_id=…&undertake_note_error=该内容暂时无法查看`` and the
+   note never renders. Seeding a session cookie makes the same URL answer 200
+   with the note — so a cached session is still required, it just is not
+   sufficient on its own.
+2. **UA-family gate (client side).** A Gecko/Firefox UA is rendered normally;
+   Chrome/Edge UAs are redirected to ``/login``; Safari-family UAs (desktop,
+   iOS, Android) are redirected to ``/website-login/captcha?verifyType=217``, a
+   slider challenge. The verdict comes from the page's risk SDK after it posts a
+   device profile to ``as.xiaohongshu.com/api/sec/v1/shield/webprofile`` and is
+   not influenced by headless mode or by how consistent the UA is with the
+   engine's own fingerprint (masking ``sec-ch-ua``/``navigator.vendor`` while
+   keeping a Safari UA still yields the slider).
+
+A session can be warmed under the Firefox UA — ``https://www.xiaohongshu.com/``
+renders the feed and issues ``web_session`` — but not under Safari or Chrome,
+which bounce to the slider and the login wall respectively. So the hook:
+
+1. renders with the desktop UA (Firefox), seeding the cached ``web_session`` if
+   one is stored — this is the steady state and costs a single page load;
+2. on a miss (no cache / expired cache) warms the session by loading the feed in
+   the same UA, captures the cookies into the framework's encrypted shared-cookie
+   store under ``www.xiaohongshu.com``, and renders once more;
+3. only then falls back to a mobile UA.
+
+The cached cookie is stored against ``www.xiaohongshu.com`` (not the alias domain
+``xhslink.cn``) so that both the encryption layer's domain filter and the
+injected cookie's scope resolve to ``.xiaohongshu.com``.
 
 The declarative snapshot rules in ``adapters.jsonc`` list selectors for both the
 desktop (``#noteContainer``) and the mobile (``.narmal-note-container``) layouts,
-so SingleFile cleans up either DOM. The desktop layout also mounts a login
-modal (``.reds-modal`` wrapping ``.login-container``, with its own
-``i.reds-mask`` backdrop) over the note; those selectors are already removed
-declaratively, and dropping ``.reds-modal`` takes the mask with it.
+so SingleFile cleans up either DOM. The desktop layout also mounts a login modal
+(``.reds-modal`` wrapping ``.login-container``, with its own ``i.reds-mask``
+backdrop) over the note; those selectors are already removed declaratively, and
+dropping ``.reds-modal`` takes the mask with it.
 
-Whether a note is gated is only known after the request, so this decision cannot
-be expressed with static config fields or URL routes and lives in the hook.
+Which gate fired is only known after the request, so this decision cannot be
+expressed with static config fields or URL routes and lives in the hook.
 """
 import logging
 import re
@@ -34,6 +50,15 @@ logger = logging.getLogger(__name__)
 
 # Note pages carry an id segment; the gated home feed does not.
 NOTE_URL_RE = re.compile(r"/(?:discovery/item|explore)/[0-9a-fA-F]{8,}")
+
+# Loading this page lets the site's JS establish the anonymous session cookie
+# (web_session) that the server requires before serving a note.
+WARMUP_URL = "https://www.xiaohongshu.com/"
+
+# The session cookie belongs to xiaohongshu.com, not the alias domain
+# xhslink.cn the bookmark is stored under. Persisting/injecting it against this
+# host makes the derived cookie domain resolve to ".xiaohongshu.com".
+SESSION_DOMAIN = "www.xiaohongshu.com"
 
 MOBILE_SELECTOR = ".narmal-note-container"
 
@@ -55,6 +80,43 @@ MOBILE_UA = (
 
 def _reached_note(page):
     return bool(NOTE_URL_RE.search(page.url))
+
+
+def _gated_reason(page):
+    """Name the gate that kept us off the note, for actionable logs."""
+    url = page.url or ""
+    if "undertake_note_error" in url:
+        return "note unavailable (server says 该内容暂时无法查看)"
+    if "/website-login/captcha" in url:
+        return "risk captcha"
+    if "/login" in url:
+        return "login wall"
+    return f"no note id in {url.split('?')[0]}"
+
+
+def _load_cached_session():
+    """Return the cached anonymous session cookie string, or '' when absent."""
+    try:
+        from site_adapters.services.auth.credentials import get_shared_cookie
+
+        cookie_str, _ = get_shared_cookie(hostname=SESSION_DOMAIN, source="auto")
+        return cookie_str or ""
+    except Exception as exc:  # noqa: BLE001 - cache is best-effort
+        logger.debug("xhs_render: session cache read failed: %s", exc)
+        return ""
+
+
+def _store_session(cookie_str):
+    """Persist the freshly captured session so later runs skip the warm-up."""
+    if not cookie_str:
+        return
+    try:
+        from site_adapters.services.auth.credentials import save_shared_cookie
+
+        save_shared_cookie(domain=SESSION_DOMAIN, cookie_str=cookie_str, source="auto")
+        logger.info("xhs_render: cached anonymous session for %s", SESSION_DOMAIN)
+    except Exception as exc:  # noqa: BLE001 - caching must never break the snapshot
+        logger.warning("xhs_render: session cache write failed: %s", exc)
 
 
 def _settle(page, mobile):
@@ -144,7 +206,7 @@ def _capture(page, attempts=6):
 
 
 def before(url, config):
-    """Render the note with the Firefox UA; mobile is only a last resort."""
+    """Render the note, reusing a cached session and warming up only on a miss."""
     from urllib.parse import urlparse
 
     from site_adapters.services.engine.browser_provider import launch_browser
@@ -162,19 +224,44 @@ def before(url, config):
 
     cookie_str = config.get("user_cookie") or ""
     domain = urlparse(target_url).hostname or ""
+    cached_session = "" if cookie_str else _load_cached_session()
+    captured = {"value": ""}
 
     browser = launch_browser(headless=True)
     contexts = []
     playwright = getattr(browser, "__playwright__", None)
 
-    def open_page(user_agent, viewport):
+    def open_page(user_agent, viewport, warm=False, seed=True):
         context = browser.new_context(user_agent=user_agent, viewport=viewport)
         contexts.append(context)
+
+        # An explicit user cookie always wins; otherwise seed the cached session.
         if cookie_str:
-            cookies = cookie_string_to_playwright_list(cookie_str, domain)
+            seed_str, seed_host = cookie_str, domain
+        elif seed and cached_session:
+            seed_str, seed_host = cached_session, SESSION_DOMAIN
+        else:
+            seed_str, seed_host = "", ""
+        if seed_str:
+            cookies = cookie_string_to_playwright_list(seed_str, seed_host)
             if cookies:
                 context.add_cookies(cookies)
+
         page = context.new_page()
+        if warm:
+            # The feed issues web_session under this UA; Safari/Chrome would be
+            # bounced to the slider/login instead.
+            try:
+                page.goto(WARMUP_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(2500)
+                jar = context.cookies([WARMUP_URL])
+                captured["value"] = "; ".join(
+                    f"{c.get('name')}={c.get('value')}"
+                    for c in jar
+                    if c.get("name")
+                )
+            except Exception as exc:  # noqa: BLE001 - warm-up is best-effort
+                logger.debug("xhs_render: warm-up failed: %s", exc)
         page.goto(
             target_url,
             wait_until="domcontentloaded",
@@ -183,22 +270,35 @@ def before(url, config):
         return page
 
     try:
+        # 1) Steady state: cached session (or explicit user cookie).
         page = open_page(desktop_ua, DESKTOP_VIEWPORT)
         if _reached_note(page):
+            logger.debug("xhs_render: rendered note with cached session")
             _settle(page, mobile=False)
         else:
-            # Gecko is the only anonymous door today; a mobile UA stays as a
-            # fallback in case the site re-opens that route.
-            logger.warning(
-                "xhs_render: desktop UA gated (%s), falling back to mobile UA",
-                page.url,
+            # 2) Cache miss / expired: warm up, capture, cache, retry once.
+            logger.info(
+                "xhs_render: %s (%s), warming up a session",
+                target_url,
+                _gated_reason(page),
             )
-            page = open_page(MOBILE_UA, MOBILE_VIEWPORT)
-            if not _reached_note(page):
-                raise RuntimeError(
-                    f"xiaohongshu gated both desktop and mobile: {page.url}"
+            page = open_page(desktop_ua, DESKTOP_VIEWPORT, warm=True, seed=False)
+            if _reached_note(page):
+                _store_session(captured["value"])
+                _settle(page, mobile=False)
+            else:
+                # 3) Last resort: a mobile UA, in case the site re-opens it.
+                logger.warning(
+                    "xhs_render: desktop still gated (%s), using mobile UA",
+                    _gated_reason(page),
                 )
-            _settle(page, mobile=True)
+                page = open_page(MOBILE_UA, MOBILE_VIEWPORT, seed=False)
+                if not _reached_note(page):
+                    raise RuntimeError(
+                        "xiaohongshu note not reachable: "
+                        f"{_gated_reason(page)}"
+                    )
+                _settle(page, mobile=True)
         _flatten_overlay(page)
         return _capture(page)
     finally:
