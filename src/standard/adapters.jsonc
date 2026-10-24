@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -301,6 +301,27 @@
       "reader": {
         "defuddle_args": { "useAsync": false }
       }
-    }
+    },
+    "xueqiu.com": {
+      "metadata": {
+        "use_browser": { "enabled": true, "wait_until": "domcontentloaded", "wait_elements": ["h1.article__bd__title"], "timeout": 30 },
+        "select_title": ["h1.article__bd__title"],
+        "rewrite_title": [["\\s+([：:，,。！？、；;（）()])", "\\1"], ["([：:，,。！？、；;（）()])\\s+", "\\1"]],
+        "select_description": ["meta[name='description']"],
+        "select_author": [".article__bd__detail p:first-child"],
+        "rewrite_author": [["^来源\\s*[：:]\\s*雪球App\\s*[，,、]\\s*作者\\s*[：:]\\s*", ""], ["\\s*[，,（(].*$", ""]],
+        "select_image": ["article img.ke_img"]
+      },
+      "snapshot": {
+        "keep_elements": ["div.article__container"],
+        "remove_elements": ["div.lite-editor"],
+        "scripts": [{ "path": "./scripts/xueqiu/xueqiu_before.js", "hook": "before" }],
+        "singlefile_args": { "--block-fonts": "false", "--remove-unused-styles": "false", "--browser-width": "1440", "--browser-height": "900", "--browser-wait-delay": "5000" }
+      },
+      "reader": {
+        "defuddle_args": { "contentSelector": [".article__bd__detail"] }
+      }
+    },
+    "www.xueqiu.com": { "type": "alias", "target": "xueqiu.com" }
   }
 }
