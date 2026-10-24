@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -275,6 +275,32 @@
         "select_author": ["meta[name=\"octolytics-dimension-user_login\"]"]
       }
     },
-    "www.github.com": { "type": "alias", "target": "github.com" }
+    "www.github.com": { "type": "alias", "target": "github.com" },
+    "threads.com": { "type": "alias", "target": "www.threads.com" },
+    "threads.net": { "type": "alias", "target": "www.threads.com" },
+    "*.threads.net": { "type": "alias", "target": "www.threads.com" },
+    "www.threads.com": {
+      "defaults": { "timeout": 60 },
+      "metadata": {
+        "use_browser": { "enabled": true, "wait_until": "domcontentloaded", "wait_elements": ["meta[property='og:title']"], "timeout": 30 },
+        "select_title": ["title", "meta[property='og:title']"],
+        "rewrite_title": [["\\n[\\s\\S]*$", ""], [" on Threads$", ""], [" 通过 Threads$", ""]],
+        "select_description": ["meta[property='og:description']"],
+        "select_image": ["meta[property='og:image']"],
+        "select_author": ["meta[property='og:title']"],
+        "rewrite_author": [["^.*\\(@([^)]+)\\).*$", "\\1"]]
+      },
+      "snapshot": {
+        "wait_elements": ["meta[property='og:title']"],
+        "wait_elements_timeout": 30,
+        "keep_elements": ["[aria-label='Column body']"],
+        "remove_elements": ["footer"],
+        "scripts": [{ "path": "./scripts/threads/threads_before.js", "hook": "before" }],
+        "singlefile_args": { "--blocked-URL-pattern": ["\\.js$"], "--remove-unused-styles": "false", "--browser-width": "1440", "--browser-height": "900", "--browser-wait-delay": "3000", "--resolve-links": "false" }
+      },
+      "reader": {
+        "defuddle_args": { "useAsync": false }
+      }
+    }
   }
 }
