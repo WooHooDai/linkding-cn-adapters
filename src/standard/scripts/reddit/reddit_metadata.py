@@ -1,22 +1,25 @@
 """Reddit metadata extraction via embed.reddit.com.
 
-embed.reddit.com is Reddit's embed host — it is not covered by the
-network-security block that 403s www.reddit.com on restricted IPs, and it
-needs no cookies. The page is server-side rendered with the full post:
-title (shreddit-embed-title or h1), selftext (div[id$="-post-rtjson-content"]),
-and the post image (largest redd.it-hosted src/srcset).
+embed.reddit.com is Reddit's embed host: server-side rendered with the full
+post (title via shreddit-embed-title or h1, selftext via
+div[id$="-post-rtjson-content"], image via the largest redd.it src/srcset),
+and it needs no cookies.
+
+The embed page sits behind Reddit's network-security filter, which rejects by
+client fingerprint: python-requests is always 403'd, and so is a Chrome-shaped
+request whose headers carry Sec-CH-UA client hints (any value) — which is what
+curl_cffi's Chrome profile sends. The Safari profile emits no client hints and
+is accepted.
 """
 import logging
 import re
 
-import requests
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:  # pragma: no cover
-    BeautifulSoup = None
+from bs4 import BeautifulSoup
+from curl_cffi import requests as chttp
 
 logger = logging.getLogger(__name__)
+
+_IMPERSONATE = "safari"
 
 
 def _build_embed_url(url):
@@ -33,25 +36,11 @@ def replace(url: str, config: dict) -> dict:
     """Fetch Reddit metadata from embed.reddit.com."""
     empty = {"title": None, "description": None, "image": None, "url": url}
 
-    if BeautifulSoup is None:
-        logger.error("reddit_metadata: beautifulsoup4 not available")
-        return empty
-
     timeout = config.get("timeout", 30) or 30
     embed_url = _build_embed_url(url)
 
     try:
-        resp = requests.get(
-            embed_url,
-            timeout=timeout,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/126.0.0.0 Safari/537.36"
-                )
-            },
-        )
+        resp = chttp.get(embed_url, timeout=timeout, impersonate=_IMPERSONATE)
     except Exception as e:
         logger.warning("reddit_metadata: embed fetch error: %s", e)
         return empty
@@ -99,10 +88,17 @@ def replace(url: str, config: dict) -> dict:
 
     image = max(image_candidates, key=_width) if image_candidates else None
 
+    # Author: the embed header's first /user/ link is the post author.
+    author = None
+    author_link = soup.select_one('a[href*="/user/"]')
+    if author_link:
+        author = author_link.get_text(strip=True) or None
+
     logger.info(
-        "reddit_metadata: title=%s, image=%s",
+        "reddit_metadata: title=%s, image=%s, author=%s",
         (title or "")[:50],
         (image or "")[:50],
+        (author or "")[:50],
     )
 
-    return {"title": title, "description": description, "image": image, "url": url}
+    return {"title": title, "description": description, "image": image, "url": url, "author": author}
