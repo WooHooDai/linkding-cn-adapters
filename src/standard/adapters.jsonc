@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.2",
+    "version": "0.2.3",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},

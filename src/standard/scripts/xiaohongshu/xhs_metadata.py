@@ -11,6 +11,12 @@ that response is an SPA shell with no og: tags — the note payload is shipped i
 
 This ``after`` hook leaves healthy results untouched and only re-fetches with a
 mobile UA when the desktop pass came back with the gated homepage metadata.
+
+Separately, video notes pass the gate but their SSR JSON-LD is a ``VideoObject``
+with no author field (image notes get an ``Article`` with ``author.name``), so
+the head-only selectors come back authorless. For those the hook re-fetches the
+desktop page and reads ``note.noteDetailMap.<id>.note.user.nickname`` from the
+body's ``__INITIAL_STATE__``.
 """
 import json
 import logging
@@ -23,6 +29,11 @@ logger = logging.getLogger(__name__)
 MOBILE_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+
+DESKTOP_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) "
+    "Gecko/20100101 Firefox/143.0"
 )
 
 # Titles the gate falls back to. The built-in rewrite_title rule strips a
@@ -115,6 +126,23 @@ def _image_from_note_data(note):
     return None
 
 
+def _author_from_state(state):
+    """Read the note author from the desktop layout's initial state."""
+    detail_map = (state.get("note") or {}).get("noteDetailMap")
+    if not isinstance(detail_map, dict):
+        return None
+    for entry in detail_map.values():
+        if not isinstance(entry, dict):
+            continue
+        user = (entry.get("note") or {}).get("user")
+        if not isinstance(user, dict):
+            continue
+        nickname = user.get("nickname")
+        if isinstance(nickname, str) and nickname.strip():
+            return nickname.strip()
+    return None
+
+
 def _note_from_state(state):
     """Pull (title, description, image) out of the parsed initial state."""
     note_data = state.get("noteData")
@@ -142,9 +170,9 @@ def _note_from_state(state):
     return title, description, image
 
 
-def _fetch_mobile(url, config):
+def _fetch(url, config, user_agent):
     headers = dict(config.get("headers") or {})
-    headers["User-Agent"] = MOBILE_UA
+    headers["User-Agent"] = user_agent
     headers.setdefault("Accept-Language", "zh-CN,zh;q=0.9")
     cookie = config.get("user_cookie") or config.get("_user_cookie")
     if cookie:
@@ -163,22 +191,15 @@ def _fetch_mobile(url, config):
     return response.text
 
 
-def after(result, url, config):
-    """Fill in metadata when the desktop pass hit the mobile-only gate."""
-    if not isinstance(result, dict):
-        return
-
-    title = result.get("title")
-    if title not in GATED_TITLES:
-        return
-
+def _recover_gated(result, url, config):
+    """Re-fetch with a mobile UA — the only one that always reaches the note."""
     target = (
         config.get("_request_url")
         or config.get("request_url")
         or url
     )
     try:
-        html = _fetch_mobile(target, config)
+        html = _fetch(target, config, MOBILE_UA)
     except Exception as exc:  # noqa: BLE001 - fallback must never break saving
         logger.warning("xhs_metadata: mobile fallback failed for %s: %s", url, exc)
         return
@@ -198,3 +219,44 @@ def after(result, url, config):
     logger.info(
         "xhs_metadata: recovered gated note via mobile UA: %s", (note_title or "")[:40]
     )
+
+
+def _recover_author(url, config):
+    """Re-fetch the desktop page and pull the author from its initial state."""
+    target = (
+        config.get("_request_url")
+        or config.get("request_url")
+        or url
+    )
+    headers = config.get("headers") or {}
+    desktop_ua = (
+        headers.get("User-Agent")
+        or headers.get("user-agent")
+        or DESKTOP_UA
+    )
+    try:
+        html = _fetch(target, config, desktop_ua)
+    except Exception as exc:  # noqa: BLE001 - fallback must never break saving
+        logger.debug("xhs_metadata: author recovery failed for %s: %s", url, exc)
+        return None
+
+    if _STATE_MARKER not in html:
+        return None
+    return _author_from_state(_parse_initial_state(html) or {})
+
+
+def after(result, url, config):
+    """Fill in metadata the head-only desktop pass could not see."""
+    if not isinstance(result, dict):
+        return
+
+    title = result.get("title")
+    if title in GATED_TITLES:
+        _recover_gated(result, url, config)
+    elif not result.get("author"):
+        author = _recover_author(url, config)
+        if author:
+            result["author"] = author
+            logger.info(
+                "xhs_metadata: recovered author from initial state: %s", author
+            )
