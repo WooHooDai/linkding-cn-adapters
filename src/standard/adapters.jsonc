@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.5",
+    "version": "0.2.6",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -126,7 +126,16 @@
     "www.x.com": { "type": "alias", "target": "x.com" },
     "x.com": {
       "metadata": {
-        "rewrite_title": [[" on X", ""], [" https://t\\.co.*$", ""], ["^\\(.*\\) ", ""]],
+        // 推文的 og:title 只有「昵称 (@账号) on X」，作标题没有信息量；
+        // 改取描述（正文）的首个非空行，即正文首段。
+        "select_title": ["meta[property='og:description']", "meta[property='og:title']", "title"],
+        "rewrite_title": [
+          ["^\\s+", ""],
+          ["\\n[\\s\\S]*$", ""],
+          ["\\s*https://t\\.co\\S*$", ""],
+          [" on X$", ""],
+          ["^\\(.*\\) ", ""]
+        ],
         "select_author": ["meta[property='og:title']", "meta[name='twitter:creator']"],
         "rewrite_author": [
           ["^(.+?) on X:.*$", "\\1"],
