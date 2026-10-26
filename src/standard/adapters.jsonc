@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.4",
+    "version": "0.2.5",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -49,7 +49,9 @@
         "rewrite_author": [
           ["^(.*) - (.*)的回答$", "\\2"],
           ["^\\s+|\\s+$", ""]
-        ]
+        ],
+        // 开启「隐私保护」的账号，回答页把作者替换成「知乎用户」；钩子用成员接口取回真名。
+        "scripts": [{ "path": "./scripts/zhihu/zhihu_author.py", "hook": "after", "timeout": 20 }]
       },
       "routes": {
         // 纯问题页（无回答）不存在单一作者，清空 author 选择器避免把问题标题误当作者。
