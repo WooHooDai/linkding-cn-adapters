@@ -17,6 +17,11 @@ with no author field (image notes get an ``Article`` with ``author.name``), so
 the head-only selectors come back authorless. For those the hook re-fetches the
 desktop page and reads ``note.noteDetailMap.<id>.note.user.nickname`` from the
 body's ``__INITIAL_STATE__``.
+
+Gated notes have no author in that desktop map — its ``note`` entry arrives
+empty — so the author is read from the mobile payload the gate fallback already
+fetched: ``noteData.data.noteData.user.nickName``. The key casing differs
+between the two layouts (desktop ``nickname`` / mobile ``nickName``).
 """
 import json
 import logging
@@ -126,6 +131,17 @@ def _image_from_note_data(note):
     return None
 
 
+def _author_name(user):
+    """Read a nickname from a user payload of either layout."""
+    if not isinstance(user, dict):
+        return None
+    for key in ("nickname", "nickName", "nick_name"):
+        name = user.get(key)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return None
+
+
 def _author_from_state(state):
     """Read the note author from the desktop layout's initial state."""
     detail_map = (state.get("note") or {}).get("noteDetailMap")
@@ -134,20 +150,17 @@ def _author_from_state(state):
     for entry in detail_map.values():
         if not isinstance(entry, dict):
             continue
-        user = (entry.get("note") or {}).get("user")
-        if not isinstance(user, dict):
-            continue
-        nickname = user.get("nickname")
-        if isinstance(nickname, str) and nickname.strip():
-            return nickname.strip()
+        author = _author_name((entry.get("note") or {}).get("user"))
+        if author:
+            return author
     return None
 
 
-def _note_from_state(state):
-    """Pull (title, description, image) out of the parsed initial state."""
+def _note_parts(state):
+    """Split the mobile payload into (preload, note), both dicts."""
     note_data = state.get("noteData")
     if not isinstance(note_data, dict):
-        return None, None, None
+        return {}, {}
 
     preload = note_data.get("normalNotePreloadData")
     preload = preload if isinstance(preload, dict) else {}
@@ -155,6 +168,19 @@ def _note_from_state(state):
     data = data if isinstance(data, dict) else {}
     note = data.get("noteData")
     note = note if isinstance(note, dict) else {}
+    return preload, note
+
+
+def _author_from_note_data(state):
+    """Read the note author from the mobile layout's initial state."""
+    return _author_name(_note_parts(state)[1].get("user"))
+
+
+def _note_from_state(state):
+    """Pull (title, description, image) out of the parsed initial state."""
+    preload, note = _note_parts(state)
+    if not preload and not note:
+        return None, None, None
 
     title = preload.get("title") or note.get("title")
     description = preload.get("desc") or note.get("desc")
@@ -207,7 +233,8 @@ def _recover_gated(result, url, config):
     if _STATE_MARKER not in html:
         return
 
-    note_title, description, image = _note_from_state(_parse_initial_state(html) or {})
+    state = _parse_initial_state(html) or {}
+    note_title, description, image = _note_from_state(state)
     if not note_title:
         return
 
@@ -216,6 +243,9 @@ def _recover_gated(result, url, config):
         result["description"] = description
     if image:
         result["image"] = image
+    author = _author_from_note_data(state)
+    if author:
+        result["author"] = author
     logger.info(
         "xhs_metadata: recovered gated note via mobile UA: %s", (note_title or "")[:40]
     )

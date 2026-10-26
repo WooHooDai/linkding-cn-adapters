@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.3",
+    "version": "0.2.4",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -110,7 +110,8 @@
         "scripts": [
           { "path": "./scripts/xiaohongshu/xhs_render.py", "hook": "before", "timeout": 60 },
           { "path": "./scripts/xiaohongshu/xhs.js", "hook": "before" },
-          { "path": "./scripts/xiaohongshu/xhs.js", "hook": "after" }
+          { "path": "./scripts/xiaohongshu/xhs.js", "hook": "after" },
+          { "path": "./scripts/xiaohongshu/xhs_video.py", "hook": "after", "timeout": 60 }
         ],
         "process_carousels": [".media-container", ".onix-carousel-container"],
         "toggles": { "video": { "selector": ".video-player-media.media-container", "default": true, "label": "保存视频" } },
