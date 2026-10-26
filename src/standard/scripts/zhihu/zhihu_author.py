@@ -16,6 +16,7 @@ reads the author id from the answer API's *masked* payload and asks
 import json
 import logging
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +55,30 @@ def _get_json(url, config, referer):
     """Fetch ``url`` as JSON, preferring the Chrome fingerprint zhihu expects."""
     timeout = min(int(config.get("timeout") or 20), 20)
     headers = _headers(config, referer)
-    try:
-        from curl_cffi import requests as chttp
+    response = None
+    # 刚刷新出的 __zse_ck 首次调 API 可能被风控拒绝（新令牌有数十秒的观察期），
+    # 退避重试直至通过；正常令牌首击即 200，无额外开销。
+    for attempt, backoff in ((1, 0), (2, 5), (3, 10)):
+        if backoff:
+            time.sleep(backoff)
+        try:
+            from curl_cffi import requests as chttp
 
-        response = chttp.get(
-            url, headers=headers, impersonate="chrome", timeout=timeout
+            response = chttp.get(
+                url, headers=headers, impersonate="chrome", timeout=timeout
+            )
+        except ImportError:
+            import requests
+
+            response = requests.get(url, headers=headers, timeout=timeout)
+        if response.status_code != 403 or attempt == 3:
+            break
+    if response is None or response.status_code != 200:
+        logger.debug(
+            "zhihu_author: %s returned %s",
+            url,
+            response.status_code if response is not None else "no response",
         )
-    except ImportError:
-        import requests
-
-        response = requests.get(url, headers=headers, timeout=timeout)
-    if response.status_code != 200:
-        logger.debug("zhihu_author: %s returned %s", url, response.status_code)
         return None
     try:
         return json.loads(response.text)
