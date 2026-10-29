@@ -283,7 +283,7 @@
     },
     "github.com": {
       "metadata": {
-        "rewrite_title": [["^GitHub - .*/", ""]],
+        "rewrite_title": [["^GitHub - [^/]*/", ""]],
         "select_author": ["meta[name=\"octolytics-dimension-user_login\"]"]
       }
     },
