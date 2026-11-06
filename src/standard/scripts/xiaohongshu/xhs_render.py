@@ -42,6 +42,12 @@ dropping ``.reds-modal`` takes the mask with it.
 
 Which gate fired is only known after the request, so this decision cannot be
 expressed with static config fields or URL routes and lives in the hook.
+
+An expired share ticket is not a gate: every retry lands on the same HTTP 200
+soft 404 page. A failing hook cannot stop the capture — the script runner
+swallows hook exceptions and SingleFile then captures that page. The declared
+``snapshot.invalid_content_patterns`` rejects the produced file before it is
+written, so the hook only has to fail fast and name the reason in the log.
 """
 import logging
 import re
@@ -50,6 +56,10 @@ logger = logging.getLogger(__name__)
 
 # Note pages carry an id segment; the gated home feed does not.
 NOTE_URL_RE = re.compile(r"/(?:discovery/item|explore)/[0-9a-fA-F]{8,}")
+
+# Expired share tickets and removed notes share one 200 soft 404 page. Warming a
+# session or switching UA cannot reach the note from there.
+SOFT_404_RE = re.compile(r"/404(?:[/?#]|$)|error_code=300031", re.I)
 
 # Loading this page lets the site's JS establish the anonymous session cookie
 # (web_session) that the server requires before serving a note.
@@ -85,6 +95,8 @@ def _reached_note(page):
 def _gated_reason(page):
     """Name the gate that kept us off the note, for actionable logs."""
     url = page.url or ""
+    if SOFT_404_RE.search(url):
+        return "soft 404 (share ticket rejected or note unavailable)"
     if "undertake_note_error" in url:
         return "note unavailable (server says 该内容暂时无法查看)"
     if "/website-login/captcha" in url:
@@ -272,6 +284,10 @@ def before(url, config):
     try:
         # 1) Steady state: cached session (or explicit user cookie).
         page = open_page(desktop_ua, DESKTOP_VIEWPORT)
+        if SOFT_404_RE.search(page.url or ""):
+            reason = _gated_reason(page)
+            logger.warning("xhs_render: %s unreachable (%s)", target_url, reason)
+            raise RuntimeError(f"xiaohongshu soft 404: {reason}")
         if _reached_note(page):
             logger.debug("xhs_render: rendered note with cached session")
             _settle(page, mobile=False)

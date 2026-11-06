@@ -22,6 +22,14 @@ Gated notes have no author in that desktop map — its ``note`` entry arrives
 empty — so the author is read from the mobile payload the gate fallback already
 fetched: ``noteData.data.noteData.user.nickName``. The key casing differs
 between the two layouts (desktop ``nickname`` / mobile ``nickName``).
+
+An expired share ticket is a different failure: the server answers 200 with a
+soft 404 page titled "小红书 - 你访问的页面不见了" (``error_code=300031``, QR
+code). The very same page is served for a removed note, a private note and a
+bare note URL, so the page itself cannot tell those cases apart; nor can a
+mobile UA recover it. Returning that title as metadata is what makes a bulk
+"refresh metadata" destructive. The bookmark task guards every field with
+``is not None``, so clearing the result preserves whatever was saved before.
 """
 import json
 import logging
@@ -41,11 +49,18 @@ DESKTOP_UA = (
     "Gecko/20100101 Firefox/143.0"
 )
 
-# Titles the gate falls back to. The built-in rewrite_title rule strips a
-# trailing " - 小红书", which does not match these, so they survive untouched.
-GATED_TITLES = {
+# UA gate: the desktop pass lands on the home feed, a mobile UA still reaches
+# the note. The built-in rewrite_title rule strips a trailing " - 小红书",
+# which does not match these, so they survive untouched.
+UA_GATED_TITLES = {
     "小红书 - 你的生活兴趣社区",
     "小红书",
+}
+
+# Soft 404: the share ticket is no longer accepted (or the note is gone).
+# No UA, cookie or parameter recovers it, and retrying only feeds the site's
+# risk layer, so this path must not issue another request.
+UNAVAILABLE_TITLES = {
     "小红书 - 你访问的页面不见了",
 }
 
@@ -275,15 +290,40 @@ def _recover_author(url, config):
     return _author_from_state(_parse_initial_state(html) or {})
 
 
+def _is_unavailable_title(title):
+    """平台错误页文案会微调，前缀 + 关键词兜底，避免漏判后覆盖已有元数据。"""
+    if not isinstance(title, str):
+        return False
+    if title in UNAVAILABLE_TITLES:
+        return True
+    return title.startswith("小红书 - ") and any(
+        word in title for word in ("不见了", "无法浏览", "404")
+    )
+
+
+def _drop_result(result, url, reason):
+    """Return no metadata so the bookmark task keeps its stored values."""
+    logger.warning("xhs_metadata: %s, discarding result for %s", reason, url)
+    for key in ("title", "description", "author", "image"):
+        result[key] = None
+
+
 def after(result, url, config):
     """Fill in metadata the head-only desktop pass could not see."""
     if not isinstance(result, dict):
         return
 
     title = result.get("title")
-    if title in GATED_TITLES:
+    if _is_unavailable_title(title):
+        _drop_result(result, url, "share ticket rejected or note unavailable")
+        return
+    if title in UA_GATED_TITLES:
         _recover_gated(result, url, config)
-    elif not result.get("author"):
+        if (result.get("title") in UA_GATED_TITLES
+                or _is_unavailable_title(result.get("title"))):
+            _drop_result(result, url, "note unreachable after mobile fallback")
+        return
+    if not result.get("author"):
         author = _recover_author(url, config)
         if author:
             result["author"] = author

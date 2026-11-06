@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.7",
+    "version": "0.2.8",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -93,7 +93,37 @@
     "xhslink.com": {
       "health": {
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0" },
-        "http_head_probe": { "blocked_location_patterns": ["/login", "/signin", "/auth", "/passport", "/accounts"] }
+        "http_head_probe": {
+          "enabled": true,
+          "timeout": 5,
+          "accept_status": [200],
+          "blocked_status": [401, 403, 407, 429],
+          "blocked_location_patterns": [
+            "/login", "/signin", "/auth", "/passport", "/accounts",
+            "/404(?:[/?#]|$)", "error_code=300031"
+          ]
+        },
+        "content_check": {
+          "enabled": true,
+          "timeout": 30,
+          "check_selectors": ["title", "body"],
+          "invalid_selectors": ["h1.error", ".not-found", "[class*='404']", "[id*='not-found']"],
+          "invalid_patterns": [
+            "404 not found", "page not found", "not found",
+            "页面不存在", "页面已不存在", "内容不存在", "文章不存在",
+            "该页面已被删除", "此页面已删除", "内容已删除", "文章已删除",
+            "已被删除或不存在", "您访问的页面不存在", "你所访问的页面不存在",
+            "页面不存在或已删除",
+            "你访问的页面不见了", "当前笔记暂时无法浏览"
+          ]
+        },
+        // 平台返回的错误页不区分「票据失效」与「笔记没了」，文案给可操作的两步判据，
+        // 避免把 blocked 误读成内容已删除而删书签或反复刷新元数据。
+        "reason": {
+          "blocked": "小红书分享票据已失效或触发访问限制：请在 App 打开笔记，重新「分享 → 复制链接」并替换书签 URL；重新分享后仍打不开，才说明笔记已删除或设为私密",
+          "missing": "小红书返回软 404 页面：可能是分享票据失效，也可能是笔记已删除。请先在 App 重新复制链接；新链接仍打不开再判定为笔记不存在",
+          "default": "小红书暂时无法访问（HTTP {http_status}），请稍后重试；不要对这类链接批量刷新元数据或重建快照"
+        }
       },
       "metadata": {
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0" },
@@ -106,6 +136,8 @@
         "rewrite_title": [[" - 小红书$", ""]]
       },
       "snapshot": {
+        // 快照前预检链接是否软 404，可避免无效启动浏览器及快照404页面
+        "precheck_health": true,
         "http": { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0" },
         "keep_elements": ["#noteContainer", ".narmal-note-container", ".comment-box"],
         "remove_elements": ["div[elementtiming='note-cover']", ".note-detail-follow-btn", ".comments-login", ".login-container", ".login-reason", ".reds-modal", ".narmal-note-container .reds-button", ".share-layer", ".recommend-box", ".user-notes-box", "#fmp.bottom-button-box", ".safe-area-bottom.margin-placeholder", ".comment-outline-button"],
