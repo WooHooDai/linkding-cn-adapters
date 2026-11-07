@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.8",
+    "version": "0.2.9",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -366,6 +366,85 @@
         "defuddle_args": { "contentSelector": [".article__bd__detail"] }
       }
     },
-    "www.xueqiu.com": { "type": "alias", "target": "xueqiu.com" }
+    "www.xueqiu.com": { "type": "alias", "target": "xueqiu.com" },
+
+    "zsxq.com": {
+      "auth": {
+        "cookie": {
+          "type": "login",
+          "verify": {
+            "http_head_probe": { "enabled": false },
+            "content_check": { "enabled": false }
+          }
+        }
+      }
+    },
+    "wx.zsxq.com": {
+      "defaults": {
+        "http": {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        }
+      },
+      "metadata": {
+        "scripts": [{ "path": "./scripts/zsxq/zsxq_topic.py", "hook": "replace", "timeout": 30 }]
+      },
+      "snapshot": {
+        "scripts": [{ "path": "./scripts/zsxq/zsxq_topic.py", "hook": "replace", "timeout": 60 }]
+      },
+      "reader": { "defuddle_args": { "contentSelector": [".zsxq-content"] } },
+      "health": {
+        "http_head_probe": {
+          "timeout": 5,
+          "blocked_status": [401, 403, 407, 429],
+          "blocked_location_patterns": ["/login", "/signin"]
+        },
+        "content_check": { "enabled": false },
+        "reason": {
+          "blocked": "知识星球登录状态可能已失效：请在站点适配器设置中更新手动 Cookie",
+          "dead": "主题不存在或已被删除",
+          "default": "暂时无法访问（HTTP {http_status}）"
+        }
+      }
+    },
+    "t.zsxq.com": { "type": "alias", "target": "wx.zsxq.com" },
+    "m.zsxq.com": { "type": "alias", "target": "wx.zsxq.com" },
+    "articles.zsxq.com": {
+      "defaults": {
+        "http": {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        }
+      },
+      "metadata": {
+        "select_title": ["h1.title", "title"],
+        "select_description": [".ql-snow .content.ql-editor > p"],
+        "rewrite_description": [["^(.{200})[\\s\\S]+$", "\\1…"]],
+        "select_author": [".author-info .nick-name"],
+        "select_image": [".ql-snow .content.ql-editor img"]
+      },
+      "snapshot": {
+        "remove_elements": [
+          ".milkdown-preview", ".tiptap-preview", ".qrcode-container", "#qrcode-url",
+          ".risk_warning_tips", "footer", ".message-container-overlay", "script"
+        ],
+        "singlefile_args": { "--remove-unused-styles": "false" }
+      },
+      "reader": { "defuddle_args": { "contentSelector": [".ql-snow .content.ql-editor"] } },
+      "health": {
+        "http_head_probe": {
+          "timeout": 5,
+          "blocked_status": [401, 403, 407, 429],
+          "blocked_location_patterns": ["/login", "/signin"]
+        },
+        "content_check": {
+          "valid_selectors": ["h1.title"],
+          "invalid_patterns": ["页面不存在", "内容已删除", "知识星球 | 深度连接铁杆粉丝"]
+        },
+        "reason": {
+          "blocked": "知识星球登录状态可能已失效：请在站点适配器设置中更新手动 Cookie",
+          "missing": "文章不存在或需要加入对应星球后才能查看",
+          "default": "暂时无法访问（HTTP {http_status}）"
+        }
+      }
+    }
   }
 }
