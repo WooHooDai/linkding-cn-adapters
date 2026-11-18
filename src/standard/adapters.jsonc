@@ -2,7 +2,7 @@
   "_meta": {
     "id": "woohoodai",
     "name": "official-standard",
-    "version": "0.2.9",
+    "version": "0.2.10",
     "description": "Official, general-purpose site adapters maintained by Linkding-cn."
   },
   "defaults": {},
@@ -368,7 +368,7 @@
     },
     "www.xueqiu.com": { "type": "alias", "target": "xueqiu.com" },
 
-    "zsxq.com": {
+    "*.zsxq.com": {
       "auth": {
         "cookie": {
           "type": "login",
